@@ -160,9 +160,9 @@ def build_ledger_view(
                     ft.DataCell(ft.Text(price_str, size=12, color=ft.Colors.GREY_400)),
                     ft.DataCell(ft.Text(row.venue, size=12)),
                     ft.DataCell(ft.Text(row.note or "", size=11, color=ft.Colors.GREY_400)),
-                    ft.DataCell(ft.Tooltip(
-                        message=row.id or "",
-                        content=ft.Text(short_id, size=11, color=ft.Colors.GREY_500),
+                    ft.DataCell(ft.Text(
+                        short_id, size=11, color=ft.Colors.GREY_500,
+                        tooltip=row.id or "",
                     )),
                     ft.DataCell(rev_btn),
                 ],

@@ -89,63 +89,49 @@ def _build_main_app(page: ft.Page, ctx: AppContextDTO) -> None:
 
     page.controls.clear()
 
-    # Závislosit — ledger_view refresh vyvolaný po přidání transakce
-    ledger_view_ref: list = [None]
+    tabs_ref: list = [None]
 
     def on_trade_added() -> None:
-        # Obnoví timeline po přidání transakce
-        if ledger_view_ref[0] is not None:
-            # Přepneme na záložku Timeline automaticky (index 1)
+        if tabs_ref[0] is not None:
             tabs_ref[0].selected_index = 1
             page.update()
 
     add_view = build_add_trade_view(page, ctx.db_path, on_trade_added)
-
-    def on_refresh() -> None:
-        pass  # ledger_view spravuje vlastní refresh
-
-    ledger_view = build_ledger_view(page, ctx.db_path, on_refresh)
-    ledger_view_ref[0] = ledger_view
+    ledger_view = build_ledger_view(page, ctx.db_path, lambda: None)
 
     tabs = ft.Tabs(
+        length=2,
         selected_index=0,
-        animation_duration=200,
-        tabs=[
-            ft.Tab(
-                text="Přidat transakci",
-                icon=ft.Icons.ADD_CIRCLE_OUTLINE,
-                content=ft.Container(
-                    content=add_view,
-                    padding=ft.padding.all(20),
-                    expand=True,
-                ),
-            ),
-            ft.Tab(
-                text="Timeline",
-                icon=ft.Icons.LIST_ALT,
-                content=ft.Container(
-                    content=ledger_view,
-                    padding=ft.padding.all(20),
-                    expand=True,
-                ),
-            ),
-        ],
         expand=True,
+        content=ft.Column(
+            expand=True,
+            controls=[
+                ft.TabBar(
+                    tabs=[
+                        ft.Tab(label="Pridat transakci", icon=ft.Icons.ADD_CIRCLE_OUTLINE),
+                        ft.Tab(label="Timeline", icon=ft.Icons.LIST_ALT),
+                    ],
+                ),
+                ft.TabBarView(
+                    expand=True,
+                    controls=[
+                        ft.Container(content=add_view, padding=20, expand=True),
+                        ft.Container(content=ledger_view, padding=20, expand=True),
+                    ],
+                ),
+            ],
+        ),
     )
-    tabs_ref = [tabs]
+    tabs_ref[0] = tabs
 
     page.appbar = ft.AppBar(
         leading=ft.Icon(ft.Icons.SHOW_CHART, color=ft.Colors.BLUE_400),
         leading_width=48,
         title=ft.Text("StocksLedger", weight=ft.FontWeight.BOLD),
         center_title=False,
-        bgcolor=ft.Colors.SURFACE_VARIANT,
+        bgcolor=ft.Colors.SURFACE_CONTAINER,
         actions=[
-            ft.Text(
-                f"v{ctx.version}",
-                size=12,
-                color=ft.Colors.GREY_400,
-            ),
+            ft.Text(f"v{ctx.version}", size=12, color=ft.Colors.GREY_400),
             ft.Container(width=12),
         ],
     )
@@ -176,12 +162,12 @@ def run_ui() -> None:
                 content=_build_error_view(page, ctx),
                 padding=40,
                 expand=True,
-                alignment=ft.alignment.center,
+                alignment=ft.Alignment(0, 0),
             ))
             return
 
         if ctx.db_state == "DB_MISSING":
-            container = ft.Container(expand=True, padding=40, alignment=ft.alignment.center)
+            container = ft.Container(expand=True, padding=40, alignment=ft.Alignment(0, 0))
 
             def on_ready() -> None:
                 # Reload context po vytvoření DB
