@@ -57,15 +57,18 @@ StocksLedger/
 │   ├── ledger_store.py         # SQLite append-only DB
 │   ├── config.py               # INI konfigurace
 │   ├── logging_setup.py        # Logging
-│   ├── dto/reporting.py        # Report DTOs (M2+)
+│   ├── dto/reporting.py        # Report DTOs (M3+)
 │   └── services/
 │       ├── trade_service.py    # BUY/SELL double-entry
 │       ├── reversal_service.py # REVERSAL
+│       ├── holdings_engine.py  # WAC + holdings z ledgeru (M2)
+│       ├── price_provider.py   # Yahoo Finance wrapper, volitelné (M2)
 │       └── ui_facade.py        # Jediný kontrakt UI↔Core
 ├── ui/
 │   ├── app_flet.py             # Hlavní Flet UI
 │   └── modules/
-│       ├── add_trade_dialog.py # Formulář
+│       ├── add_trade_dialog.py # Formulář (modální dialog)
+│       ├── portfolio_view.py   # Portfolio View — výchozí obrazovka (M2)
 │       └── ledger_view.py      # Timeline tabulka
 └── tests/                      # pytest testy
 ```
@@ -77,22 +80,29 @@ StocksLedger/
 
 ## Flet 0.85 API — ověřené vzory
 - `ft.run(fn)` ne `ft.app(target=fn)`
-- `page.open(dlg)` / `page.pop_dialog()` pro dialogy
+- `page.show_dialog(dlg)` / `page.pop_dialog()` pro dialogy (`page.open()` neexistuje v 0.85.2)
 - `ft.Icons.X` (velké I)
 - Vlastní NavigationRail = `ft.Column` s `ft.Icon` + `ft.Text`
 
-## Co M1 řeší
-- Ruční zadávání transakcí přes formulář
-- Append-only SQLite ledger
-- Timeline chronologický seznam
-- REVERSAL storno
+## Co M2 řeší
+- Holdings Engine: qty + WAC z ledger rows, čistě ledger-centric
+- Portfolio View: výchozí obrazovka, pozice, WAC, cost_basis
+- Price Provider: volitelný yfinance wrapper (spot, value, P/L, ROI)
+- Background price loading (page.run_task async pattern)
+- Dashboard odstraněn
 
-## Co M1 neřeší (budoucí milníky)
-- M2: WAC engine, holdings, pozice, CSV import
-- M3: Cashflow, netto-invested, price provider
+## Budoucí milníky
+- M3: Cashflow, netto-invested, CSV import
 - M4: Corporate actions (dividend reinvestment, split)
 - M5: Daňový engine (FIFO, CZ tax report)
 - M6: Parser pro XTB, Degiro, IBKR
+
+## Holdings Engine — klíčové principy
+- `compute_holdings(List[RawRow]) → List[HoldingRaw]` — čistá funkce, žádný DB write
+- Přeskočí stornované skupiny: REVERSAL note = `'REVERSAL of <trade_id>'`
+- Filtruje FIAT legs BUY/SELL: `{"EUR", "USD", "CZK", "GBP", "PLN"}`
+- WAC reset při uzavření pozice (qty → 0)
+- DIVIDEND/FEE/TAX/CASH_IN/CASH_OUT neovlivňují holdings
 
 ## Konvence
 - Venue vždy lowercase

@@ -1,12 +1,13 @@
-"""UI Facade — jediný kontrakt mezi UI a Core (StocksLedger M1).
+"""UI Facade — jediný kontrakt mezi UI a Core (StocksLedger M2).
 
 Public API:
-    create_app_context(config_path)  -> AppContextDTO
-    create_db(db_path)               -> SimpleResultDTO
-    set_db_path(new_db_path)         -> SimpleResultDTO
-    add_trade(request, db_path)      -> AddTradeResultDTO
-    get_ledger_rows(db_path)         -> list[RawRow]
-    reverse_trade(db_path, trade_id) -> list[RawRow]
+    create_app_context(config_path)   -> AppContextDTO
+    create_db(db_path)                -> SimpleResultDTO
+    set_db_path(new_db_path)          -> SimpleResultDTO
+    add_trade(request, db_path)       -> AddTradeResultDTO
+    get_ledger_rows(db_path)          -> list[RawRow]
+    reverse_trade(db_path, trade_id)  -> list[RawRow]
+    get_portfolio_snapshot(db_path)   -> PortfolioSnapshotDTO
 
 Typy transakcí:
     BUY / SELL   → double-entry přes trade_service (asset leg + currency leg)
@@ -98,6 +99,30 @@ class ImportResultDTO:
     rows_added: int
     rows_skipped: int
     error_message: Optional[str] = None
+
+
+@dataclass
+class PositionDTO:
+    """Akciová pozice odvozená z ledgeru — ledger-centric, žádný cache."""
+    ticker: str
+    quantity: Decimal
+    wac: Decimal               # Weighted Average Cost per unit
+    cost_basis: Decimal        # quantity × wac
+    currency: str              # quote měna (EUR, USD, ...)
+    spot_price: Optional[Decimal] = None    # aktuální cena (yfinance, volitelné)
+    value: Optional[Decimal] = None         # quantity × spot_price
+    unrealized_pnl: Optional[Decimal] = None  # value − cost_basis
+    roi: Optional[Decimal] = None           # unrealized_pnl / cost_basis (jako zlomek)
+
+
+@dataclass
+class PortfolioSnapshotDTO:
+    """Snapshot portfolia odvozený čistě z ledgeru + volitelných cen."""
+    positions: List[PositionDTO]
+    total_cost_basis: Decimal
+    total_value: Optional[Decimal] = None
+    total_pnl: Optional[Decimal] = None
+    total_roi: Optional[Decimal] = None
 
 
 # ── App context ────────────────────────────────────────────────────────────────
@@ -263,6 +288,38 @@ def get_ledger_rows(db_path: str) -> List[RawRow]:
         return store.timeline()
     finally:
         store.close()
+
+
+# ── Portfolio snapshot ─────────────────────────────────────────────────────────
+
+def get_portfolio_snapshot(db_path: str) -> PortfolioSnapshotDTO:
+    """Vrátí aktuální pozice odvozené čistě z ledger rows (žádný cache, žádný DB write).
+
+    Ceny (spot_price, value, unrealized_pnl, roi) jsou None — obohacení
+    probíhá volitelně v UI vrstvě přes price_provider na pozadí.
+    """
+    from core.services.holdings_engine import compute_holdings
+
+    rows = get_ledger_rows(db_path)
+    holdings = compute_holdings(rows)
+
+    positions: List[PositionDTO] = []
+    total_cost = Decimal("0")
+
+    for h in holdings:
+        total_cost += h.cost_basis
+        positions.append(PositionDTO(
+            ticker=h.ticker,
+            quantity=h.quantity,
+            wac=h.wac,
+            cost_basis=h.cost_basis,
+            currency=h.currency,
+        ))
+
+    return PortfolioSnapshotDTO(
+        positions=positions,
+        total_cost_basis=total_cost,
+    )
 
 
 # ── Reversal ───────────────────────────────────────────────────────────────────

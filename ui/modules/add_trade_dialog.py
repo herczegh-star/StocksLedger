@@ -1,4 +1,4 @@
-"""Formulář pro ruční zadání transakce."""
+"""Modální dialog pro ruční zadání transakce."""
 from __future__ import annotations
 
 from datetime import datetime
@@ -12,18 +12,16 @@ from core.services.ui_facade import AddTradeRequestDTO, AddTradeResultDTO, add_t
 _TRADE_TYPES = ["BUY", "SELL", "DIVIDEND", "FEE", "TAX", "CASH_IN", "CASH_OUT"]
 _CURRENCIES  = ["EUR", "CZK", "USD", "GBP", "PLN"]
 
-# Typy, které potřebují pole Ticker (asset je stock ticker, ne měna)
 _TICKER_TYPES = {"BUY", "SELL", "DIVIDEND"}
-# Typy, které zobrazují pole Cena/kus
 _PRICE_TYPES  = {"BUY", "SELL"}
 
 
-def build_add_trade_view(
+def open_add_trade_dialog(
     page: ft.Page,
     db_path: str,
-    on_trade_added: Callable[[], None],
-) -> ft.Control:
-    """Vrátí ft.Column s formulářem pro přidání transakce."""
+    on_after_add: Callable[[], None],
+) -> None:
+    """Otevře modální dialog pro přidání transakce."""
 
     # ── Formulářové prvky ─────────────────────────────────────────────────────
 
@@ -41,7 +39,6 @@ def build_add_trade_view(
         width=230,
     )
 
-    # Asset / Ticker — label se mění podle typu
     asset_tf = ft.TextField(
         label="Ticker (např. AAPL)",
         hint_text="AAPL, VOW3, IWDA...",
@@ -102,24 +99,16 @@ def build_add_trade_view(
 
     type_dd.on_change = _on_type_change
 
-    def _clear_form() -> None:
-        date_tf.value = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        asset_tf.value = ""
-        amount_tf.value = ""
-        price_tf.value = ""
-        note_tf.value = ""
-        status_text.value = ""
-        page.update()
+    def _close(_e=None) -> None:
+        page.pop_dialog()
 
     def _on_submit(_e) -> None:
-        # Parsování data
         try:
             ts = datetime.fromisoformat(date_tf.value.strip())
         except (ValueError, AttributeError):
             _set_status("Neplatné datum — použij formát YYYY-MM-DD HH:MM:SS", error=True)
             return
 
-        # Parsování množství
         try:
             amount = Decimal(amount_tf.value.strip().replace(",", "."))
             if amount <= 0:
@@ -128,7 +117,6 @@ def build_add_trade_view(
             _set_status("Množství musí být kladné číslo (např. 10 nebo 1500.50)", error=True)
             return
 
-        # Parsování ceny (volitelné)
         price: Optional[Decimal] = None
         if price_tf.visible and price_tf.value and price_tf.value.strip():
             try:
@@ -163,31 +151,37 @@ def build_add_trade_view(
         result: AddTradeResultDTO = add_trade(req, db_path)
 
         if result.success:
-            n = result.n_rows_added
-            ttype = type_dd.value
-            _set_status(f"OK — {ttype} uložen ({n} {'řádek' if n == 1 else 'řádky' if n <= 4 else 'řádků'})")
-            _clear_form()
-            on_trade_added()
+            page.pop_dialog()
+            on_after_add()
         else:
             _set_status(result.error_message or "Neznámá chyba", error=True)
 
-    submit_btn = ft.ElevatedButton(
-        "Přidat transakci",
-        icon=ft.Icons.ADD,
-        on_click=_on_submit,
-    )
-
-    # ── Layout ────────────────────────────────────────────────────────────────
-    return ft.Column(
-        controls=[
-            ft.Text("Přidat transakci", size=20, weight=ft.FontWeight.BOLD),
-            ft.Divider(height=8),
-            ft.Row([type_dd, date_tf], wrap=True, spacing=12),
-            ft.Row([asset_tf, amount_tf, currency_dd], wrap=True, spacing=12),
-            ft.Row([price_tf, venue_tf], wrap=True, spacing=12),
-            note_tf,
-            ft.Row([submit_btn, status_text], spacing=16, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+    dlg = ft.AlertDialog(
+        modal=True,
+        title=ft.Text("Přidat transakci", weight=ft.FontWeight.BOLD, size=18),
+        content=ft.Container(
+            width=580,
+            content=ft.Column(
+                controls=[
+                    ft.Row([type_dd, date_tf], wrap=True, spacing=12),
+                    ft.Row([asset_tf, amount_tf, currency_dd], wrap=True, spacing=12),
+                    ft.Row([price_tf, venue_tf], wrap=True, spacing=12),
+                    note_tf,
+                    status_text,
+                ],
+                spacing=12,
+                scroll=ft.ScrollMode.AUTO,
+                tight=True,
+            ),
+        ),
+        actions=[
+            ft.TextButton("Zrušit", on_click=_close),
+            ft.ElevatedButton(
+                "Přidat transakci",
+                icon=ft.Icons.ADD,
+                on_click=_on_submit,
+            ),
         ],
-        spacing=12,
-        scroll=ft.ScrollMode.AUTO,
+        actions_alignment=ft.MainAxisAlignment.END,
     )
+    page.show_dialog(dlg)

@@ -1,4 +1,5 @@
 anyio==4.13.0
+yfinance>=0.2.40
 certifi==2026.5.20
 colorama==0.4.6
 flet==0.85.2

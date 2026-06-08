@@ -57,9 +57,8 @@ def _fmt_price(price) -> str:
 def build_ledger_view(
     page: ft.Page,
     db_path: str,
-    on_refresh: Callable[[], None],
-) -> ft.Control:
-    """Vrátí ft.Column s timeline tabulkou a možností REVERSAL."""
+    on_after_reverse: Callable[[], None] = None,
+) -> tuple:
 
     row_count_text = ft.Text("", size=13, color=ft.Colors.GREY_400)
     status_text    = ft.Text("", size=13)
@@ -79,7 +78,8 @@ def build_ledger_view(
                 rows = reverse_trade(db_path, trade_id)
                 _set_status(f"Stornováno ({len(rows)} řádků přidáno).")
                 refresh()
-                on_refresh()
+                if on_after_reverse:
+                    on_after_reverse()
             except ValueError as exc:
                 _set_status(str(exc), error=True)
 
@@ -104,7 +104,7 @@ def build_ledger_view(
                 ),
             ],
         )
-        page.open(dlg)
+        page.show_dialog(dlg)
 
     def _build_table(rows: List[RawRow]) -> ft.Control:
         if not rows:
@@ -187,7 +187,7 @@ def build_ledger_view(
 
     refresh()
 
-    return ft.Column(
+    view = ft.Column(
         controls=[
             ft.Text("Timeline", size=20, weight=ft.FontWeight.BOLD),
             ft.Divider(height=8),
@@ -214,3 +214,4 @@ def build_ledger_view(
         expand=True,
         spacing=4,
     )
+    return view, refresh

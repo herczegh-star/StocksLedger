@@ -1,8 +1,13 @@
-"""Hlavní Flet UI pro StocksLedger M1.
+"""Hlavní Flet UI pro StocksLedger M2.
 
 Struktura:
-    AppBar  — název + verze + stav DB
-    Tabs    — "Přidat transakci" | "Timeline"
+    Header (54px)  — název + Add Transaction + Refresh
+    Body:
+        Left Nav (88px) | VerticalDivider | Content area
+
+Navigace:
+    [0] Portfolio  — výchozí obrazovka, holdings + WAC (ledger-centric)
+    [1] Ledger     — chronologická timeline
 """
 from __future__ import annotations
 
@@ -21,12 +26,17 @@ from core.services.ui_facade import (
 
 logger = logging.getLogger(__name__)
 
+BG          = "#0b0f14"
+BG_HDR      = "#0d1117"
+BORDER      = "#1e293b"
+T_PRI       = "#e2e8f0"
+T_MUT       = "#7b8799"
+BLUE_ACTIVE = "#1d4ed8"
 
-# ── Onboarding (první spuštění nebo chybná DB) ────────────────────────────────
+
+# ── Onboarding ────────────────────────────────────────────────────────────────
 
 def _build_onboarding_view(page: ft.Page, ctx: AppContextDTO, on_ready: callable) -> ft.Control:
-    """Jednoduché nastavení — vytvoří DB a spustí hlavní app."""
-
     status = ft.Text("", size=13)
 
     def _create(_e) -> None:
@@ -39,27 +49,19 @@ def _build_onboarding_view(page: ft.Page, ctx: AppContextDTO, on_ready: callable
             status.color = ft.Colors.RED_400
             page.update()
 
-    db_info = ft.Text(
-        f"Databáze: {ctx.db_path}",
-        size=13,
-        color=ft.Colors.GREY_400,
-        selectable=True,
-    )
-
-    create_btn = ft.ElevatedButton(
-        "Vytvořit databázi a spustit",
-        icon=ft.Icons.STORAGE,
-        on_click=_create,
-    )
-
     return ft.Column(
         controls=[
             ft.Icon(ft.Icons.SHOW_CHART, size=48, color=ft.Colors.BLUE_400),
             ft.Text("StocksLedger", size=28, weight=ft.FontWeight.BOLD),
             ft.Text("První spuštění — databáze nebyla nalezena.", size=14),
-            db_info,
+            ft.Text(f"Databáze: {ctx.db_path}", size=13,
+                    color=ft.Colors.GREY_400, selectable=True),
             ft.Divider(),
-            create_btn,
+            ft.ElevatedButton(
+                "Vytvořit databázi a spustit",
+                icon=ft.Icons.STORAGE,
+                on_click=_create,
+            ),
             status,
         ],
         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
@@ -83,60 +85,171 @@ def _build_error_view(page: ft.Page, ctx: AppContextDTO) -> ft.Control:
 # ── Hlavní aplikace ───────────────────────────────────────────────────────────
 
 def _build_main_app(page: ft.Page, ctx: AppContextDTO) -> None:
-    """Postaví a zobrazí hlavní tabové UI."""
-    from ui.modules.add_trade_dialog import build_add_trade_view
+    from ui.modules.add_trade_dialog import open_add_trade_dialog
     from ui.modules.ledger_view import build_ledger_view
+    from ui.modules.portfolio_view import build_portfolio_view
 
     page.controls.clear()
+    page.appbar = None
+    db_path = ctx.db_path
 
-    tabs_ref: list = [None]
+    # ── Content host ──────────────────────────────────────────────────────────
+    _content = ft.Container(expand=True, bgcolor=BG)
 
-    def on_trade_added() -> None:
-        if tabs_ref[0] is not None:
-            tabs_ref[0].selected_index = 1
-            page.update()
+    # ── Refresh helpers ───────────────────────────────────────────────────────
+    # Closure čte proměnné níže z enclosing scope — přiřazeny před jakoukoli
+    # interakcí, takže jsou vždy platné při zavolání. ✓
+    _run_portfolio = None
+    _run_ledger    = None
+    _ledger_view   = None
 
-    add_view = build_add_trade_view(page, ctx.db_path, on_trade_added)
-    ledger_view = build_ledger_view(page, ctx.db_path, lambda: None)
+    def _refresh_all() -> None:
+        if _run_portfolio:
+            _run_portfolio()
+        if _content.content is _ledger_view and _run_ledger:
+            _run_ledger()
 
-    tabs = ft.Tabs(
-        length=2,
-        selected_index=0,
-        expand=True,
-        content=ft.Column(
-            expand=True,
-            controls=[
-                ft.TabBar(
-                    tabs=[
-                        ft.Tab(label="Pridat transakci", icon=ft.Icons.ADD_CIRCLE_OUTLINE),
-                        ft.Tab(label="Timeline", icon=ft.Icons.LIST_ALT),
+    # ── Build views ───────────────────────────────────────────────────────────
+    _portfolio_view, _run_portfolio = build_portfolio_view(page, db_path)
+    _ledger_view,    _run_ledger    = build_ledger_view(
+        page, db_path, on_after_reverse=_refresh_all,
+    )
+
+    # ── Nav ───────────────────────────────────────────────────────────────────
+    _NAV_ITEMS = [
+        (ft.Icons.SHOW_CHART_OUTLINED,  ft.Icons.SHOW_CHART,  "Portfolio"),
+        (ft.Icons.LIST_ALT_OUTLINED,    ft.Icons.LIST_ALT,    "Ledger"),
+    ]
+    _nav_idx = [0]
+    _nav_col = ft.Column(spacing=2, tight=True)
+
+    def set_view(idx: int) -> None:
+        _nav_idx[0] = idx
+        _rebuild_nav_col()
+        if idx == 0:
+            _content.content = _portfolio_view
+            _run_portfolio()
+        else:
+            _content.content = _ledger_view
+            _run_ledger()
+        page.update()
+
+    def _build_nav_btn(idx: int) -> ft.Container:
+        active = _nav_idx[0] == idx
+        icon_off, icon_on, label = _NAV_ITEMS[idx]
+
+        def _click(e, i=idx):
+            set_view(i)
+
+        return ft.Container(
+            content=ft.Column(
+                [
+                    ft.Icon(
+                        icon_on if active else icon_off,
+                        color=T_PRI if active else T_MUT,
+                        size=20,
+                    ),
+                    ft.Text(
+                        label, size=9,
+                        color=T_PRI if active else T_MUT,
+                        text_align=ft.TextAlign.CENTER,
+                        width=72,
+                    ),
+                ],
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=3,
+                tight=True,
+            ),
+            padding=ft.Padding.all(10),
+            bgcolor=BLUE_ACTIVE + "55" if active else "transparent",
+            border_radius=8,
+            on_click=_click,
+            ink=True,
+            width=80,
+        )
+
+    def _rebuild_nav_col() -> None:
+        _nav_col.controls = [_build_nav_btn(i) for i in range(len(_NAV_ITEMS))]
+
+    _rebuild_nav_col()
+
+    # ── Header ────────────────────────────────────────────────────────────────
+    def _on_add_trade(e) -> None:
+        open_add_trade_dialog(page, db_path, _refresh_all)
+
+    def _on_refresh(e) -> None:
+        if _content.content is _portfolio_view:
+            _run_portfolio()
+        else:
+            _run_ledger()
+        page.update()
+
+    _header = ft.Container(
+        content=ft.Row(
+            [
+                ft.Row(
+                    [
+                        ft.Icon(ft.Icons.SHOW_CHART, color=ft.Colors.BLUE_400, size=22),
+                        ft.Text(
+                            "StocksLedger", size=17,
+                            weight=ft.FontWeight.BOLD, color=T_PRI,
+                        ),
+                        ft.Text(f"v{ctx.version}", size=11, color=T_MUT),
                     ],
+                    spacing=8,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
-                ft.TabBarView(
-                    expand=True,
-                    controls=[
-                        ft.Container(content=add_view, padding=20, expand=True),
-                        ft.Container(content=ledger_view, padding=20, expand=True),
+                ft.Row(
+                    [
+                        ft.ElevatedButton(
+                            "Add Transaction",
+                            icon=ft.Icons.ADD,
+                            on_click=_on_add_trade,
+                            style=ft.ButtonStyle(
+                                color=ft.Colors.WHITE,
+                                bgcolor=ft.Colors.GREEN_700,
+                            ),
+                        ),
+                        ft.TextButton(
+                            "Refresh",
+                            on_click=_on_refresh,
+                            style=ft.ButtonStyle(color=T_MUT),
+                        ),
                     ],
+                    spacing=4,
                 ),
             ],
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
         ),
-    )
-    tabs_ref[0] = tabs
-
-    page.appbar = ft.AppBar(
-        leading=ft.Icon(ft.Icons.SHOW_CHART, color=ft.Colors.BLUE_400),
-        leading_width=48,
-        title=ft.Text("StocksLedger", weight=ft.FontWeight.BOLD),
-        center_title=False,
-        bgcolor=ft.Colors.SURFACE_CONTAINER,
-        actions=[
-            ft.Text(f"v{ctx.version}", size=12, color=ft.Colors.GREY_400),
-            ft.Container(width=12),
-        ],
+        bgcolor=BG_HDR,
+        padding=ft.Padding.all(12),
+        border=ft.Border.only(bottom=ft.BorderSide(1, BORDER)),
     )
 
-    page.add(tabs)
+    # ── Body ──────────────────────────────────────────────────────────────────
+    _nav_host = ft.Container(
+        width=88,
+        bgcolor=BG_HDR,
+        content=ft.Column(
+            [ft.Container(height=8), _nav_col],
+            spacing=0,
+            tight=True,
+        ),
+        padding=0,
+    )
+
+    _body_row = ft.Row(
+        [_nav_host, ft.VerticalDivider(width=1, color=BORDER), _content],
+        expand=True,
+        spacing=0,
+        vertical_alignment=ft.CrossAxisAlignment.STRETCH,
+    )
+
+    page.add(ft.Column([_header, _body_row], spacing=0, expand=True))
+
+    # ── Výchozí obrazovka: Portfolio ─────────────────────────────────────────
+    _content.content = _portfolio_view
+    _run_portfolio()
     page.update()
 
 
@@ -153,6 +266,7 @@ def run_ui() -> None:
         page.window.min_width = 900
         page.window.min_height = 600
         page.padding = 0
+        page.bgcolor = BG
 
         ctx = create_app_context()
         logger.info("AppContext: db_state=%s  db_path=%s", ctx.db_state, ctx.db_path)
@@ -160,17 +274,20 @@ def run_ui() -> None:
         if ctx.db_state == "DB_ERROR":
             page.add(ft.Container(
                 content=_build_error_view(page, ctx),
-                padding=40,
+                padding=ft.Padding.all(40),
                 expand=True,
                 alignment=ft.Alignment(0, 0),
             ))
             return
 
         if ctx.db_state == "DB_MISSING":
-            container = ft.Container(expand=True, padding=40, alignment=ft.Alignment(0, 0))
+            container = ft.Container(
+                expand=True,
+                padding=ft.Padding.all(40),
+                alignment=ft.Alignment(0, 0),
+            )
 
             def on_ready() -> None:
-                # Reload context po vytvoření DB
                 new_ctx = create_app_context()
                 page.controls.clear()
                 page.appbar = None
