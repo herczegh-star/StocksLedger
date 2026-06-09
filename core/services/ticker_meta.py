@@ -44,6 +44,8 @@ def save_names(db_path: str, names: Dict[str, str]) -> None:
 def fetch_names(tickers: List[str]) -> Dict[str, str]:
     """Načte názvy společností z Yahoo Finance pro dané tickery.
 
+    Používá stejný alias layer jako price_provider (_yf_ticker).
+    Klíče výsledku jsou vždy původní ledger tickery.
     Vrátí pouze tickery, pro které se podařilo jméno najít.
     Nevyvolá výjimku — chyby jsou tiše ignorovány.
     """
@@ -55,14 +57,17 @@ def fetch_names(tickers: List[str]) -> Dict[str, str]:
     except ImportError:
         return {}
 
+    from core.services.price_provider import _yf_ticker
+
     result: Dict[str, str] = {}
     for ticker in tickers:
+        yf_sym = _yf_ticker(ticker)
         try:
-            info = yf.Ticker(ticker).info
+            info = yf.Ticker(yf_sym).info
             name = info.get("longName") or info.get("shortName")
             if name:
-                result[ticker] = name
-                logger.debug("Jméno %s: %s", ticker, name)
+                result[ticker] = name  # klíč = ledger ticker
+                logger.debug("Jméno %s (yf: %s): %s", ticker, yf_sym, name)
         except Exception as exc:
             logger.debug("Fetch jméno %s selhal: %s", ticker, exc)
 
