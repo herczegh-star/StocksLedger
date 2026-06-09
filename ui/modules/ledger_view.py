@@ -174,12 +174,17 @@ def build_ledger_view(
             if row.id:
                 seen_ids.add(row.id)
 
-            del_btn = ft.IconButton(
-                icon=ft.Icons.DELETE_OUTLINE,
-                tooltip="Smazat transakci",
-                icon_color=ft.Colors.RED_400,
+            del_btn = ft.PopupMenuButton(
+                icon=ft.Icons.MORE_VERT,
+                icon_color=ft.Colors.GREY_500,
                 icon_size=18,
-                on_click=lambda _e, tid=row.id, tt=ttype: _confirm_delete(tid, tt),
+                items=[
+                    ft.PopupMenuItem(
+                        icon=ft.Icons.DELETE_OUTLINE,
+                        text="Smazat transakci",
+                        on_click=lambda _e, tid=row.id, tt=ttype: _confirm_delete(tid, tt),
+                    ),
+                ],
             ) if show_delete else ft.Text("")
 
             data_rows.append(ft.DataRow(
