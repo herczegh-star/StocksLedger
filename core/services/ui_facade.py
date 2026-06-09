@@ -108,10 +108,10 @@ class PositionDTO:
     wac: Decimal               # Weighted Average Cost per unit
     cost_basis: Decimal        # quantity × wac
     currency: str              # quote měna (EUR, USD, ...)
-    spot_price: Optional[Decimal] = None    # aktuální cena (yfinance, volitelné)
-    value: Optional[Decimal] = None         # quantity × spot_price
-    unrealized_pnl: Optional[Decimal] = None  # value − cost_basis
-    roi: Optional[Decimal] = None           # unrealized_pnl / cost_basis (jako zlomek)
+    spot_price: Optional[Decimal] = None       # aktuální cena (yfinance, volitelné)
+    position_value: Optional[Decimal] = None   # quantity × spot_price
+    unrealized_pnl: Optional[Decimal] = None   # position_value − cost_basis (M3.2+)
+    roi: Optional[Decimal] = None              # unrealized_pnl / cost_basis (M3.2+)
 
 
 @dataclass
@@ -119,9 +119,9 @@ class PortfolioSnapshotDTO:
     """Snapshot portfolia odvozený čistě z ledgeru + volitelných cen."""
     positions: List[PositionDTO]
     total_cost_basis: Decimal
-    total_value: Optional[Decimal] = None
-    total_pnl: Optional[Decimal] = None
-    total_roi: Optional[Decimal] = None
+    portfolio_value: Optional[Decimal] = None  # součet position_value kde cena dostupná
+    total_pnl: Optional[Decimal] = None        # M3.2+
+    total_roi: Optional[Decimal] = None        # M3.2+
 
 
 # ── App context ────────────────────────────────────────────────────────────────

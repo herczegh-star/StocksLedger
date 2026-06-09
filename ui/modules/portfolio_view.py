@@ -1,8 +1,9 @@
-"""Portfolio View — výchozí obrazovka StocksLedger M2.
+"""Portfolio View — výchozí obrazovka StocksLedger M3.1.
 
 Zobrazuje aktuální akciové pozice odvozené z ledgeru.
-Ceny (spot, value, P/L, ROI) se načítají volitelně přes yfinance na pozadí.
-Názvy společností se načítají z JSON cache a doplňují přes yfinance.
+Ceny (spot, position_value) se načítají přes yfinance na pozadí.
+Názvy společností se načítají z JSON cache.
+P/L a ROI zatím neimplementovány (M3.2+).
 """
 from __future__ import annotations
 
@@ -18,15 +19,11 @@ BG_CARD = "#0f1621"
 BORDER  = "#1e293b"
 T_PRI   = "#e2e8f0"
 T_MUT   = "#7b8799"
-GREEN   = "#16a34a"
-RED     = "#ef4444"
 BLUE    = "#1d4ed8"
 
 _SORT_FIELDS = [
     ("name", "Name"),
-    ("pnl",  "P/L"),
     ("val",  "Value"),
-    ("roi",  "ROI"),
 ]
 
 
@@ -42,7 +39,7 @@ def _fmt_qty(v: Decimal) -> str:
         return str(v)
 
 
-def _fmt_price(v: Optional[Decimal], currency: str = "EUR") -> str:
+def _fmt_price(v: Optional[Decimal], currency: str = "USD") -> str:
     if v is None:
         return "—"
     try:
@@ -57,44 +54,15 @@ def _fmt_price(v: Optional[Decimal], currency: str = "EUR") -> str:
         return str(v)
 
 
-def _fmt_pnl(v: Optional[Decimal], currency: str = "EUR") -> str:
-    if v is None:
-        return "—"
-    try:
-        f = float(v)
-        sign = "+" if f >= 0 else ""
-        return f"{sign}{f:,.2f} {currency}".replace(",", " ")
-    except Exception:
-        return str(v)
-
-
-def _fmt_roi(v: Optional[Decimal]) -> str:
-    if v is None:
-        return "—"
-    try:
-        pct = float(v) * 100
-        sign = "+" if pct >= 0 else ""
-        return f"{sign}{pct:.2f}%"
-    except Exception:
-        return str(v)
-
-
-def _pnl_color(v: Optional[Decimal]) -> str:
-    if v is None:
-        return T_MUT
-    return GREEN if float(v) >= 0 else RED
-
-
 def _sort_positions(positions: List[PositionDTO], field: str, asc: bool) -> List[PositionDTO]:
-    _big = Decimal("999999999")
     if field == "name":
         return sorted(positions, key=lambda p: p.ticker, reverse=not asc)
-    elif field == "pnl":
-        return sorted(positions, key=lambda p: p.unrealized_pnl if p.unrealized_pnl is not None else -_big, reverse=not asc)
     elif field == "val":
-        return sorted(positions, key=lambda p: p.value if p.value is not None else Decimal("0"), reverse=not asc)
-    elif field == "roi":
-        return sorted(positions, key=lambda p: p.roi if p.roi is not None else -_big, reverse=not asc)
+        return sorted(
+            positions,
+            key=lambda p: p.position_value if p.position_value is not None else Decimal("0"),
+            reverse=not asc,
+        )
     return positions
 
 
@@ -104,15 +72,13 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
     """Vrátí (view, refresh_fn). refresh_fn() znovu načte data z ledgeru."""
 
     # ── State ─────────────────────────────────────────────────────────────────
-    _snap: list = [None]           # PortfolioSnapshotDTO
+    _snap: list = [None]       # PortfolioSnapshotDTO
     _sort = {"field": "name", "asc": True}
-    _names: list = [{}]            # Dict[ticker, company_name] — z JSON cache
+    _names: list = [{}]        # Dict[ticker, company_name] — z JSON cache
 
     # ── KPI widgets ───────────────────────────────────────────────────────────
     w_cost = ft.Text("—", size=22, weight=ft.FontWeight.BOLD, color=T_PRI)
     w_val  = ft.Text("—", size=22, weight=ft.FontWeight.BOLD, color=T_MUT)
-    w_pnl  = ft.Text("—", size=22, weight=ft.FontWeight.BOLD, color=T_MUT)
-    w_roi  = ft.Text("—", size=22, weight=ft.FontWeight.BOLD, color=T_MUT)
 
     # ── Dynamic regions ───────────────────────────────────────────────────────
     pills_row = ft.Row(spacing=6)
@@ -137,22 +103,17 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
         s: Optional[PortfolioSnapshotDTO] = _snap[0]
         if s is None:
             return
-        currency = s.positions[0].currency if s.positions else "EUR"
+        currency = s.positions[0].currency if s.positions else "USD"
 
         w_cost.value = _fmt_price(s.total_cost_basis, currency)
         w_cost.color = T_PRI
 
-        if s.total_value is not None:
-            w_val.value = _fmt_price(s.total_value, currency)
+        if s.portfolio_value is not None:
+            w_val.value = _fmt_price(s.portfolio_value, currency)
             w_val.color = T_PRI
-            w_pnl.value = _fmt_pnl(s.total_pnl, currency)
-            w_pnl.color = _pnl_color(s.total_pnl)
-            w_roi.value = _fmt_roi(s.total_roi)
-            w_roi.color = _pnl_color(s.total_roi)
         else:
-            w_val.value = "—"; w_val.color = T_MUT
-            w_pnl.value = "—"; w_pnl.color = T_MUT
-            w_roi.value = "—"; w_roi.color = T_MUT
+            w_val.value = "—"
+            w_val.color = T_MUT
 
     # ── Sort pills ────────────────────────────────────────────────────────────
     def _build_pills() -> None:
@@ -195,10 +156,8 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
     # ── Position card ─────────────────────────────────────────────────────────
     def _make_card(pos: PositionDTO) -> ft.Container:
         currency = pos.currency
-        pnl_col = _pnl_color(pos.unrealized_pnl)
         company_name = _names[0].get(pos.ticker)
 
-        # Levá strana: název společnosti (pokud znám) + ticker
         if company_name:
             left = ft.Column(
                 [
@@ -213,33 +172,15 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
         return ft.Container(
             content=ft.Column(
                 [
-                    ft.Row(
-                        [
-                            left,
-                            ft.Row(
-                                [
-                                    ft.Text(
-                                        _fmt_pnl(pos.unrealized_pnl, currency),
-                                        size=14, weight=ft.FontWeight.W_600, color=pnl_col,
-                                    ),
-                                    ft.Text(
-                                        _fmt_roi(pos.roi),
-                                        size=14, weight=ft.FontWeight.W_600, color=pnl_col,
-                                    ),
-                                ],
-                                spacing=12, tight=True,
-                            ),
-                        ],
-                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                    ),
+                    left,
                     ft.Divider(height=1, color="#1f2a3a"),
                     ft.Row(
                         [
-                            _stat("Qty",         _fmt_qty(pos.quantity)),
-                            _stat("WAC",         _fmt_price(pos.wac, currency)),
-                            _stat("Cost Basis",  _fmt_price(pos.cost_basis, currency)),
-                            _stat("Spot",        _fmt_price(pos.spot_price, currency)),
-                            _stat("Value",       _fmt_price(pos.value, currency)),
+                            _stat("Qty",        _fmt_qty(pos.quantity)),
+                            _stat("WAC",        _fmt_price(pos.wac, currency)),
+                            _stat("Cost Basis", _fmt_price(pos.cost_basis, currency)),
+                            _stat("Spot",       _fmt_price(pos.spot_price, currency)),
+                            _stat("Value",      _fmt_price(pos.position_value, currency)),
                         ],
                         spacing=32,
                     ),
@@ -273,21 +214,22 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
 
     # ── Background price + name loading ──────────────────────────────────────
     def _load_prices(snap: PortfolioSnapshotDTO) -> None:
-        """Načte ceny z yfinance na pozadí a aktualizuje snapshot.
+        """Načte ceny z yfinance na pozadí, vypočte position_value, aktualizuje UI.
         Zároveň doplní chybějící názvy společností do JSON cache.
+        portfolio_value = partial sum (i.e. pokud jen část tickerů má cenu).
         """
         from core.services.ticker_meta import fetch_names, load_names, save_names
 
         tickers = [p.ticker for p in snap.positions]
 
-        # ── Ceny ──────────────────────────────────────────────────────────────
+        # Ceny
         try:
             from core.services.price_provider import fetch_prices
             prices = fetch_prices(tickers)
         except Exception:
             prices = {}
 
-        # ── Názvy — pouze pro tickery dosud neznámé ───────────────────────────
+        # Názvy — pouze pro tickery dosud neznámé
         current_names: Dict[str, str] = load_names(db_path)
         unknown = [t for t in tickers if t not in current_names]
         if unknown:
@@ -299,17 +241,14 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
         if not prices and not unknown:
             return
 
-        # ── Sestav obohacené PositionDTO (nové instance — thread-safe) ────────
+        # Obohacené PositionDTO — nové instance (thread-safe)
         enriched: List[PositionDTO] = []
-        total_value = Decimal("0")
-        all_have_price = True
+        portfolio_value = Decimal("0")
 
         for pos in snap.positions:
             spot = prices.get(pos.ticker)
             if spot:
-                value = pos.quantity * spot
-                pnl = value - pos.cost_basis
-                roi = pnl / pos.cost_basis if pos.cost_basis > 0 else None
+                pos_val = pos.quantity * spot
                 enriched.append(PositionDTO(
                     ticker=pos.ticker,
                     quantity=pos.quantity,
@@ -317,29 +256,19 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
                     cost_basis=pos.cost_basis,
                     currency=pos.currency,
                     spot_price=spot,
-                    value=value,
-                    unrealized_pnl=pnl,
-                    roi=roi,
+                    position_value=pos_val,
+                    # unrealized_pnl, roi — M3.2+
                 ))
-                total_value += value
+                portfolio_value += pos_val
             else:
                 enriched.append(pos)
-                all_have_price = False
 
-        if all_have_price and enriched:
-            total_pnl = total_value - snap.total_cost_basis
-            enriched_snap = PortfolioSnapshotDTO(
-                positions=enriched,
-                total_cost_basis=snap.total_cost_basis,
-                total_value=total_value,
-                total_pnl=total_pnl,
-                total_roi=total_pnl / snap.total_cost_basis if snap.total_cost_basis > 0 else None,
-            )
-        else:
-            enriched_snap = PortfolioSnapshotDTO(
-                positions=enriched if enriched else snap.positions,
-                total_cost_basis=snap.total_cost_basis,
-            )
+        # portfolio_value = partial sum; None pouze pokud žádná cena není dostupná
+        enriched_snap = PortfolioSnapshotDTO(
+            positions=enriched,
+            total_cost_basis=snap.total_cost_basis,
+            portfolio_value=portfolio_value if portfolio_value > 0 else None,
+        )
 
         async def _ui_update() -> None:
             _names[0] = current_names
@@ -356,7 +285,7 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
 
         snap = get_portfolio_snapshot(db_path)
         _snap[0] = snap
-        _names[0] = load_names(db_path)  # okamžitě z JSON cache (fast)
+        _names[0] = load_names(db_path)
 
         _update_kpis()
         _build_pills()
@@ -371,8 +300,6 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
         [
             _kpi_box("Cost Basis",     w_cost),
             _kpi_box("Portfolio Value", w_val),
-            _kpi_box("Unrealized P/L", w_pnl),
-            _kpi_box("ROI",            w_roi),
         ],
         spacing=16,
     )
