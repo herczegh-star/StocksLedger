@@ -81,6 +81,9 @@ StocksLedger/
 - `ft.run(fn)` ne `ft.app(target=fn)`
 - `page.show_dialog(dlg)` / `page.pop_dialog()` pro dialogy (`page.open()` neexistuje v 0.85.2)
 - `ft.Icons.X` (velké I)
+- `ft.Border.all(1, color)` a `ft.Padding.all(n)` — velké B/P (ne lowercase)
+- `ft.PopupMenuItem(content="...", icon=..., on_click=...)` — parametr `content=` ne `text=`
+- `ft.Row(spacing=16)` bez `wrap=True` pro expand=True děti
 - Vlastní NavigationRail = `ft.Column` s `ft.Icon` + `ft.Text`
 
 ## Co M2 řeší
