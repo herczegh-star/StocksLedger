@@ -1,4 +1,4 @@
-"""Ledger Store: SQLite append-only databáze. Žádné UPDATE / DELETE."""
+"""Ledger Store: SQLite databáze pro ledger řádky."""
 import sqlite3
 from datetime import datetime
 from decimal import Decimal
@@ -172,6 +172,12 @@ class LedgerStore:
             (limit,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def delete_trade(self, trade_id: str) -> int:
+        """Smaže všechny řádky se zadaným trade_id. Vrátí počet smazaných řádků."""
+        cursor = self.conn.execute("DELETE FROM ledger WHERE id = ?", (trade_id,))
+        self.conn.commit()
+        return cursor.rowcount
 
     def count(self) -> int:
         return self.conn.execute("SELECT COUNT(*) FROM ledger").fetchone()[0]

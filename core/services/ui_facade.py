@@ -6,7 +6,7 @@ Public API:
     set_db_path(new_db_path)          -> SimpleResultDTO
     add_trade(request, db_path)       -> AddTradeResultDTO
     get_ledger_rows(db_path)          -> list[RawRow]
-    reverse_trade(db_path, trade_id)  -> list[RawRow]
+    delete_trade(db_path, trade_id)   -> SimpleResultDTO
     get_portfolio_snapshot(db_path)   -> PortfolioSnapshotDTO
 
 Typy transakcí:
@@ -31,7 +31,6 @@ logger = logging.getLogger(__name__)
 from core.constants import TRADE_TYPES
 from core.ledger_store import LedgerStore
 from core.model import RawRow
-from core.services.reversal_service import reverse_trade as _rt
 from core.services.trade_service import (
     AddTradeInput,
     add_trade as _core_add_trade,
@@ -322,8 +321,19 @@ def get_portfolio_snapshot(db_path: str) -> PortfolioSnapshotDTO:
     )
 
 
-# ── Reversal ───────────────────────────────────────────────────────────────────
+# ── Delete trade ──────────────────────────────────────────────────────────────
 
-def reverse_trade(db_path: str, trade_id: str) -> List[RawRow]:
-    """Stornuje skupinu řádků trade_id. Raises ValueError pokud neexistuje."""
-    return _rt(db_path, trade_id)
+def delete_trade(db_path: str, trade_id: str) -> SimpleResultDTO:
+    """Smaže všechny řádky trade_id z ledgeru. Nevratná operace."""
+    store = LedgerStore(db_path)
+    try:
+        n = store.delete_trade(trade_id)
+        if n == 0:
+            return SimpleResultDTO(success=False, error_message=f"Trade ID '{trade_id}' nenalezeno.")
+        return SimpleResultDTO(success=True)
+    except Exception as exc:
+        msg = f"Nelze smazat trade '{trade_id}': {exc}"
+        logger.error(msg)
+        return SimpleResultDTO(success=False, error_message=msg)
+    finally:
+        store.close()

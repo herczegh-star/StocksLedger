@@ -112,7 +112,7 @@ def _build_main_app(page: ft.Page, ctx: AppContextDTO) -> None:
     # ── Build views ───────────────────────────────────────────────────────────
     _portfolio_view, _run_portfolio = build_portfolio_view(page, db_path)
     _ledger_view,    _run_ledger    = build_ledger_view(
-        page, db_path, on_after_reverse=_refresh_all,
+        page, db_path, on_after_change=_refresh_all,
     )
 
     # ── Nav ───────────────────────────────────────────────────────────────────

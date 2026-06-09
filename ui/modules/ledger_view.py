@@ -1,4 +1,4 @@
-"""Timeline pohled — chronologický seznam všech transakcí s možností REVERSAL."""
+"""Timeline pohled — chronologický seznam všech transakcí s možností smazání."""
 from __future__ import annotations
 
 from decimal import Decimal
@@ -7,9 +7,8 @@ from typing import Callable, List
 import flet as ft
 
 from core.model import RawRow
-from core.services.ui_facade import get_ledger_rows, reverse_trade
+from core.services.ui_facade import delete_trade, get_ledger_rows
 
-# Barvy podle typu transakce
 _TYPE_COLORS = {
     "BUY":      ft.Colors.GREEN_400,
     "SELL":     ft.Colors.RED_400,
@@ -19,18 +18,6 @@ _TYPE_COLORS = {
     "CASH_IN":  ft.Colors.CYAN_300,
     "CASH_OUT": ft.Colors.PINK_300,
     "REVERSAL": ft.Colors.GREY_400,
-}
-
-_COL_WIDTHS = {
-    "datum":     160,
-    "typ":        90,
-    "asset":      80,
-    "mnozstvi":  120,
-    "mena":       60,
-    "cena":       90,
-    "venue":      90,
-    "poznamka":  180,
-    "id":        200,
 }
 
 
@@ -57,11 +44,11 @@ def _fmt_price(price) -> str:
 def build_ledger_view(
     page: ft.Page,
     db_path: str,
-    on_after_reverse: Callable[[], None] = None,
+    on_after_change: Callable[[], None] = None,
 ) -> tuple:
 
-    row_count_text = ft.Text("", size=13, color=ft.Colors.GREY_400)
-    status_text    = ft.Text("", size=13)
+    row_count_text  = ft.Text("", size=13, color=ft.Colors.GREY_400)
+    status_text     = ft.Text("", size=13)
     table_container = ft.Column(scroll=ft.ScrollMode.AUTO, expand=True)
 
     def _set_status(msg: str, error: bool = False) -> None:
@@ -69,102 +56,152 @@ def build_ledger_view(
         status_text.color = ft.Colors.RED_400 if error else ft.Colors.GREEN_400
         page.update()
 
-    def _confirm_reversal(trade_id: str, trade_type: str) -> None:
-        """Zobrazí potvrzovací dialog pro REVERSAL."""
+    def _confirm_delete(trade_id: str, trade_type: str) -> None:
+        """Dvoustupňový dialog pro smazání transakce."""
 
-        def _do_reversal(_e) -> None:
+        def _do_delete(_e) -> None:
             page.pop_dialog()
-            try:
-                rows = reverse_trade(db_path, trade_id)
-                _set_status(f"Stornováno ({len(rows)} řádků přidáno).")
+            result = delete_trade(db_path, trade_id)
+            if result.success:
+                _set_status("Transakce smazána.")
                 refresh()
-                if on_after_reverse:
-                    on_after_reverse()
-            except ValueError as exc:
-                _set_status(str(exc), error=True)
+                if on_after_change:
+                    on_after_change()
+            else:
+                _set_status(result.error_message or "Chyba při mazání.", error=True)
 
         def _cancel(_e) -> None:
             page.pop_dialog()
 
+        short_id = trade_id[:40] + ("…" if len(trade_id) > 40 else "")
+
         dlg = ft.AlertDialog(
             modal=True,
-            title=ft.Text("Stornovat transakci?"),
-            content=ft.Text(
-                f"Typ: {trade_type}\nID: {trade_id}\n\n"
-                "Vytvoří se REVERSAL řádky, které přesně negují tuto transakci.\n"
-                "Operaci nelze vrátit zpět.",
+            title=ft.Row(
+                [
+                    ft.Icon(ft.Icons.DELETE_FOREVER, color=ft.Colors.RED_400, size=22),
+                    ft.Text("Smazat transakci?", weight=ft.FontWeight.BOLD),
+                ],
+                spacing=8,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            content=ft.Column(
+                [
+                    ft.Row(
+                        [
+                            ft.Container(
+                                ft.Text(trade_type, size=12, weight=ft.FontWeight.BOLD,
+                                        color=_TYPE_COLORS.get(trade_type, ft.Colors.WHITE)),
+                                bgcolor="#1a2030", border_radius=6,
+                                padding=ft.Padding(left=10, top=4, right=10, bottom=4),
+                            ),
+                            ft.Text(short_id, size=11, color=ft.Colors.GREY_400),
+                        ],
+                        spacing=10,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    ft.Container(
+                        content=ft.Row(
+                            [
+                                ft.Icon(ft.Icons.WARNING_AMBER_ROUNDED,
+                                        color=ft.Colors.RED_300, size=18),
+                                ft.Text(
+                                    "Tato operace je nevratná.\n"
+                                    "Všechny řádky tohoto trade_id budou\n"
+                                    "trvale smazány z databáze.",
+                                    size=13, color=ft.Colors.RED_300,
+                                ),
+                            ],
+                            spacing=10,
+                            vertical_alignment=ft.CrossAxisAlignment.START,
+                        ),
+                        bgcolor="#2d1010",
+                        border=ft.Border.all(1, "#7f1d1d"),
+                        border_radius=8,
+                        padding=12,
+                    ),
+                ],
+                spacing=12,
+                tight=True,
             ),
             actions=[
                 ft.TextButton("Zrušit", on_click=_cancel),
                 ft.ElevatedButton(
-                    "Stornovat",
-                    icon=ft.Icons.UNDO,
-                    on_click=_do_reversal,
-                    style=ft.ButtonStyle(color=ft.Colors.RED_400),
+                    "Smazat",
+                    icon=ft.Icons.DELETE_FOREVER,
+                    on_click=_do_delete,
+                    style=ft.ButtonStyle(
+                        color=ft.Colors.WHITE,
+                        bgcolor=ft.Colors.RED_700,
+                    ),
                 ),
             ],
+            actions_alignment=ft.MainAxisAlignment.END,
         )
         page.show_dialog(dlg)
 
     def _build_table(rows: List[RawRow]) -> ft.Control:
         if not rows:
-            return ft.Text("Ledger je prázdný. Přidej první transakci.", color=ft.Colors.GREY_400)
+            return ft.Text("Ledger je prázdný. Přidej první transakci.",
+                           color=ft.Colors.GREY_400)
 
-        # Hlavička
         header_cells = [
-            ft.DataColumn(ft.Text("Datum / čas",   size=12, weight=ft.FontWeight.BOLD)),
-            ft.DataColumn(ft.Text("Typ",            size=12, weight=ft.FontWeight.BOLD)),
-            ft.DataColumn(ft.Text("Asset",          size=12, weight=ft.FontWeight.BOLD)),
-            ft.DataColumn(ft.Text("Množství",       size=12, weight=ft.FontWeight.BOLD), numeric=True),
-            ft.DataColumn(ft.Text("Měna",           size=12, weight=ft.FontWeight.BOLD)),
-            ft.DataColumn(ft.Text("Cena",           size=12, weight=ft.FontWeight.BOLD), numeric=True),
-            ft.DataColumn(ft.Text("Venue",          size=12, weight=ft.FontWeight.BOLD)),
-            ft.DataColumn(ft.Text("Poznámka",       size=12, weight=ft.FontWeight.BOLD)),
-            ft.DataColumn(ft.Text("Trade ID",       size=12, weight=ft.FontWeight.BOLD)),
-            ft.DataColumn(ft.Text("Akce",           size=12, weight=ft.FontWeight.BOLD)),
+            ft.DataColumn(ft.Text("Datum / čas",  size=12, weight=ft.FontWeight.BOLD)),
+            ft.DataColumn(ft.Text("Typ",           size=12, weight=ft.FontWeight.BOLD)),
+            ft.DataColumn(ft.Text("Asset",         size=12, weight=ft.FontWeight.BOLD)),
+            ft.DataColumn(ft.Text("Množství",      size=12, weight=ft.FontWeight.BOLD), numeric=True),
+            ft.DataColumn(ft.Text("Měna",          size=12, weight=ft.FontWeight.BOLD)),
+            ft.DataColumn(ft.Text("Cena",          size=12, weight=ft.FontWeight.BOLD), numeric=True),
+            ft.DataColumn(ft.Text("Venue",         size=12, weight=ft.FontWeight.BOLD)),
+            ft.DataColumn(ft.Text("Poznámka",      size=12, weight=ft.FontWeight.BOLD)),
+            ft.DataColumn(ft.Text("Trade ID",      size=12, weight=ft.FontWeight.BOLD)),
+            ft.DataColumn(ft.Text("Akce",          size=12, weight=ft.FontWeight.BOLD)),
         ]
 
-        # Řádky (nejnovější nahoře)
         data_rows = []
         seen_ids: set = set()
 
         for row in reversed(rows):
-            ttype  = row.type
-            color  = _TYPE_COLORS.get(ttype, ft.Colors.WHITE)
+            ttype      = row.type
+            color      = _TYPE_COLORS.get(ttype, ft.Colors.WHITE)
             amount_str = _fmt_amount(row.amount)
             price_str  = _fmt_price(row.price)
-            ts_str = row.timestamp.strftime("%Y-%m-%d %H:%M:%S")
-            short_id = (row.id or "")[:28] + ("…" if len(row.id or "") > 28 else "")
+            ts_str     = row.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+            short_id   = (row.id or "")[:28] + ("…" if len(row.id or "") > 28 else "")
 
-            # REVERSAL tlačítko — zobrazit jen jednou na trade_id a jen pro non-REVERSAL
-            can_reverse = ttype != "REVERSAL" and row.id not in seen_ids
+            # Tlačítko smazat — zobrazit jen jednou na trade_id
+            show_delete = row.id not in seen_ids
             if row.id:
                 seen_ids.add(row.id)
 
-            rev_btn = ft.IconButton(
-                icon=ft.Icons.UNDO,
-                tooltip="Stornovat tuto transakci",
-                icon_color=ft.Colors.ORANGE_300,
+            del_btn = ft.IconButton(
+                icon=ft.Icons.DELETE_OUTLINE,
+                tooltip="Smazat transakci",
+                icon_color=ft.Colors.RED_400,
                 icon_size=18,
-                on_click=lambda _e, tid=row.id, tt=ttype: _confirm_reversal(tid, tt),
-            ) if can_reverse else ft.Text("")
+                on_click=lambda _e, tid=row.id, tt=ttype: _confirm_delete(tid, tt),
+            ) if show_delete else ft.Text("")
 
             data_rows.append(ft.DataRow(
                 cells=[
                     ft.DataCell(ft.Text(ts_str, size=12)),
-                    ft.DataCell(ft.Text(ttype, size=12, color=color, weight=ft.FontWeight.BOLD)),
+                    ft.DataCell(ft.Text(ttype, size=12, color=color,
+                                        weight=ft.FontWeight.BOLD)),
                     ft.DataCell(ft.Text(row.asset, size=12)),
                     ft.DataCell(ft.Text(amount_str, size=12,
-                                        color=ft.Colors.GREEN_300 if row.amount > 0 else ft.Colors.RED_300)),
+                                        color=ft.Colors.GREEN_300 if row.amount > 0
+                                        else ft.Colors.RED_300)),
                     ft.DataCell(ft.Text(row.currency, size=12)),
-                    ft.DataCell(ft.Text(price_str, size=12, color=ft.Colors.GREY_400)),
+                    ft.DataCell(ft.Text(price_str, size=12,
+                                        color=ft.Colors.GREY_400)),
                     ft.DataCell(ft.Text(row.venue, size=12)),
-                    ft.DataCell(ft.Text(row.note or "", size=11, color=ft.Colors.GREY_400)),
+                    ft.DataCell(ft.Text(row.note or "", size=11,
+                                        color=ft.Colors.GREY_400)),
                     ft.DataCell(ft.Text(
                         short_id, size=11, color=ft.Colors.GREY_500,
                         tooltip=row.id or "",
                     )),
-                    ft.DataCell(rev_btn),
+                    ft.DataCell(del_btn),
                 ],
             ))
 

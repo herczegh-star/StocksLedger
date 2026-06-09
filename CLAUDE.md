@@ -40,10 +40,9 @@ I/O Modul  →  CORE (doménová logika)  →  Services/Facade  →  Grafika (Fl
 
 ## Kanonické principy (neměnné)
 1. Ledger-centric — jediný zdroj pravdy
-2. Append-only — žádný UPDATE, žádný DELETE
-3. Opravy pouze přes REVERSAL
-4. Broker-agnostic core
-5. MVP filozofie — implementovat jen to, co je aktuálně potřeba
+2. Opravy přes DELETE s dvoustupňovým potvrzením (ne REVERSAL)
+3. Broker-agnostic core
+4. MVP filozofie — implementovat jen to, co je aktuálně potřeba
 
 ## Struktura projektu
 ```
