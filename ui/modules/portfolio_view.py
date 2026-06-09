@@ -2,12 +2,13 @@
 
 Zobrazuje aktuální akciové pozice odvozené z ledgeru.
 Ceny (spot, value, P/L, ROI) se načítají volitelně přes yfinance na pozadí.
+Názvy společností se načítají z JSON cache a doplňují přes yfinance.
 """
 from __future__ import annotations
 
 import threading
 from decimal import Decimal
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import flet as ft
 
@@ -103,8 +104,9 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
     """Vrátí (view, refresh_fn). refresh_fn() znovu načte data z ledgeru."""
 
     # ── State ─────────────────────────────────────────────────────────────────
-    _snap: list = [None]  # PortfolioSnapshotDTO
+    _snap: list = [None]           # PortfolioSnapshotDTO
     _sort = {"field": "name", "asc": True}
+    _names: list = [{}]            # Dict[ticker, company_name] — z JSON cache
 
     # ── KPI widgets ───────────────────────────────────────────────────────────
     w_cost = ft.Text("—", size=22, weight=ft.FontWeight.BOLD, color=T_PRI)
@@ -194,13 +196,26 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
     def _make_card(pos: PositionDTO) -> ft.Container:
         currency = pos.currency
         pnl_col = _pnl_color(pos.unrealized_pnl)
+        company_name = _names[0].get(pos.ticker)
+
+        # Levá strana: název společnosti (pokud znám) + ticker
+        if company_name:
+            left = ft.Column(
+                [
+                    ft.Text(company_name, size=13, color=T_MUT),
+                    ft.Text(pos.ticker, size=18, weight=ft.FontWeight.BOLD, color=T_PRI),
+                ],
+                spacing=1, tight=True,
+            )
+        else:
+            left = ft.Text(pos.ticker, size=18, weight=ft.FontWeight.BOLD, color=T_PRI)
 
         return ft.Container(
             content=ft.Column(
                 [
                     ft.Row(
                         [
-                            ft.Text(pos.ticker, size=18, weight=ft.FontWeight.BOLD, color=T_PRI),
+                            left,
                             ft.Row(
                                 [
                                     ft.Text(
@@ -256,20 +271,35 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
         cards_col.controls = [_make_card(p) for p in sorted_pos]
         cards_col.controls.append(ft.Container(height=32))
 
-    # ── Background price loading ──────────────────────────────────────────────
+    # ── Background price + name loading ──────────────────────────────────────
     def _load_prices(snap: PortfolioSnapshotDTO) -> None:
-        """Načte ceny z yfinance na pozadí a aktualizuje snapshot."""
+        """Načte ceny z yfinance na pozadí a aktualizuje snapshot.
+        Zároveň doplní chybějící názvy společností do JSON cache.
+        """
+        from core.services.ticker_meta import fetch_names, load_names, save_names
+
         tickers = [p.ticker for p in snap.positions]
+
+        # ── Ceny ──────────────────────────────────────────────────────────────
         try:
             from core.services.price_provider import fetch_prices
             prices = fetch_prices(tickers)
         except Exception:
+            prices = {}
+
+        # ── Názvy — pouze pro tickery dosud neznámé ───────────────────────────
+        current_names: Dict[str, str] = load_names(db_path)
+        unknown = [t for t in tickers if t not in current_names]
+        if unknown:
+            new_names = fetch_names(unknown)
+            if new_names:
+                current_names.update(new_names)
+                save_names(db_path, current_names)
+
+        if not prices and not unknown:
             return
 
-        if not prices:
-            return
-
-        # Sestav obohacené PositionDTO objekty (nové instance — thread-safe)
+        # ── Sestav obohacené PositionDTO (nové instance — thread-safe) ────────
         enriched: List[PositionDTO] = []
         total_value = Decimal("0")
         all_have_price = True
@@ -296,7 +326,7 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
                 enriched.append(pos)
                 all_have_price = False
 
-        if all_have_price:
+        if all_have_price and enriched:
             total_pnl = total_value - snap.total_cost_basis
             enriched_snap = PortfolioSnapshotDTO(
                 positions=enriched,
@@ -307,11 +337,12 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
             )
         else:
             enriched_snap = PortfolioSnapshotDTO(
-                positions=enriched,
+                positions=enriched if enriched else snap.positions,
                 total_cost_basis=snap.total_cost_basis,
             )
 
         async def _ui_update() -> None:
+            _names[0] = current_names
             _snap[0] = enriched_snap
             _update_kpis()
             _build_cards()
@@ -321,8 +352,11 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
 
     # ── Refresh ───────────────────────────────────────────────────────────────
     def refresh() -> None:
+        from core.services.ticker_meta import load_names
+
         snap = get_portfolio_snapshot(db_path)
         _snap[0] = snap
+        _names[0] = load_names(db_path)  # okamžitě z JSON cache (fast)
 
         _update_kpis()
         _build_pills()
