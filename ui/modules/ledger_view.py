@@ -181,7 +181,7 @@ def build_ledger_view(
                 items=[
                     ft.PopupMenuItem(
                         icon=ft.Icons.DELETE_OUTLINE,
-                        text="Smazat transakci",
+                        content="Smazat transakci",
                         on_click=lambda _e, tid=row.id, tt=ttype: _confirm_delete(tid, tt),
                     ),
                 ],
