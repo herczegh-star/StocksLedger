@@ -77,6 +77,20 @@ def _fetch_one(session, yf_sym: str) -> Optional[float]:
     return None
 
 
+def fetch_eurusd() -> Optional[Decimal]:
+    """Načte aktuální EUR/USD kurz z Yahoo Finance (ticker EURUSD=X).
+
+    Vrátí None pokud fetch selže — caller zobrazí '—' pro EUR-dependent pole.
+    """
+    session = _make_session()
+    if session is None:
+        return None
+    rate = _fetch_one(session, "EURUSD=X")
+    if rate is not None and rate > 0:
+        return Decimal(str(round(rate, 6)))
+    return None
+
+
 def fetch_prices(tickers: List[str]) -> Dict[str, Decimal]:
     """Načte aktuální ceny z Yahoo Finance chart API.
 

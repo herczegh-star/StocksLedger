@@ -108,7 +108,8 @@ class PositionDTO:
     wac: Decimal               # Weighted Average Cost per unit
     cost_basis: Decimal        # quantity × wac
     currency: str              # quote měna (EUR, USD, ...)
-    spot_price: Optional[Decimal] = None       # aktuální cena (yfinance, volitelné)
+    spot_price: Optional[Decimal] = None       # aktuální cena (volitelné)
+    spot_currency: Optional[str] = None        # měna spot_price (může se lišit od currency)
     position_value: Optional[Decimal] = None   # quantity × spot_price
     unrealized_pnl: Optional[Decimal] = None   # position_value − cost_basis (M3.2+)
     roi: Optional[Decimal] = None              # unrealized_pnl / cost_basis (M3.2+)

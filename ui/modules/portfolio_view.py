@@ -109,7 +109,7 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
         w_cost.color = T_PRI
 
         if s.portfolio_value is not None:
-            w_val.value = _fmt_price(s.portfolio_value, currency)
+            w_val.value = _fmt_price(s.portfolio_value, "EUR")
             w_val.color = T_PRI
         else:
             w_val.value = "—"
@@ -155,8 +155,9 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
 
     # ── Position card ─────────────────────────────────────────────────────────
     def _make_card(pos: PositionDTO) -> ft.Container:
-        currency = pos.currency
-        company_name = _names[0].get(pos.ticker)
+        currency      = pos.currency
+        spot_currency = pos.spot_currency or currency
+        company_name  = _names[0].get(pos.ticker)
 
         if company_name:
             left = ft.Column(
@@ -179,8 +180,8 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
                             _stat("Qty",        _fmt_qty(pos.quantity)),
                             _stat("WAC",        _fmt_price(pos.wac, currency)),
                             _stat("Cost Basis", _fmt_price(pos.cost_basis, currency)),
-                            _stat("Spot",       _fmt_price(pos.spot_price, currency)),
-                            _stat("Value",      _fmt_price(pos.position_value, currency)),
+                            _stat("Spot",       _fmt_price(pos.spot_price, spot_currency)),
+                            _stat("Value",      _fmt_price(pos.position_value, spot_currency)),
                         ],
                         spacing=32,
                     ),
@@ -214,20 +215,23 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
 
     # ── Background price + name loading ──────────────────────────────────────
     def _load_prices(snap: PortfolioSnapshotDTO) -> None:
-        """Načte ceny z yfinance na pozadí, vypočte position_value, aktualizuje UI.
+        """Načte USD ceny + EUR/USD kurz na pozadí, přepočte spot_eur a position_value.
         Zároveň doplní chybějící názvy společností do JSON cache.
-        portfolio_value = partial sum (i.e. pokud jen část tickerů má cenu).
+        portfolio_value = partial sum v EUR (i.e. pokud jen část tickerů má cenu).
+        Pokud EUR/USD kurz není dostupný, spot i value zůstanou None → UI zobrazí '—'.
         """
         from core.services.ticker_meta import fetch_names, load_names, save_names
 
         tickers = [p.ticker for p in snap.positions]
 
-        # Ceny
+        # Ceny v USD + EUR/USD kurz
         try:
-            from core.services.price_provider import fetch_prices
-            prices = fetch_prices(tickers)
+            from core.services.price_provider import fetch_eurusd, fetch_prices
+            prices_usd = fetch_prices(tickers)
+            eurusd = fetch_eurusd()
         except Exception:
-            prices = {}
+            prices_usd = {}
+            eurusd = None
 
         # Názvy — pouze pro tickery dosud neznámé
         current_names: Dict[str, str] = load_names(db_path)
@@ -238,7 +242,7 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
                 current_names.update(new_names)
                 save_names(db_path, current_names)
 
-        if not prices and not unknown:
+        if not prices_usd and not unknown:
             return
 
         # Obohacené PositionDTO — nové instance (thread-safe)
@@ -246,22 +250,23 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
         portfolio_value = Decimal("0")
 
         for pos in snap.positions:
-            spot = prices.get(pos.ticker)
-            if spot:
-                pos_val = pos.quantity * spot
-                enriched.append(PositionDTO(
-                    ticker=pos.ticker,
-                    quantity=pos.quantity,
-                    wac=pos.wac,
-                    cost_basis=pos.cost_basis,
-                    currency=pos.currency,
-                    spot_price=spot,
-                    position_value=pos_val,
-                    # unrealized_pnl, roi — M3.2+
-                ))
+            spot_usd = prices_usd.get(pos.ticker)
+            spot_eur = (spot_usd / eurusd) if (spot_usd and eurusd) else None
+            pos_val  = (pos.quantity * spot_eur) if spot_eur is not None else None
+
+            if pos_val is not None:
                 portfolio_value += pos_val
-            else:
-                enriched.append(pos)
+
+            enriched.append(PositionDTO(
+                ticker=pos.ticker,
+                quantity=pos.quantity,
+                wac=pos.wac,
+                cost_basis=pos.cost_basis,
+                currency=pos.currency,
+                spot_price=spot_eur,
+                spot_currency="EUR" if spot_eur is not None else None,
+                position_value=pos_val,
+            ))
 
         # portfolio_value = partial sum; None pouze pokud žádná cena není dostupná
         enriched_snap = PortfolioSnapshotDTO(

@@ -9,9 +9,8 @@ import flet as ft
 
 from core.services.ui_facade import AddTradeRequestDTO, AddTradeResultDTO, add_trade
 
-_TRADE_TYPES = ["BUY", "SELL", "DIVIDEND", "FEE", "TAX", "CASH_IN", "CASH_OUT"]
-_CURRENCIES  = ["EUR", "CZK", "USD", "GBP", "PLN"]
-
+_TRADE_TYPES  = ["BUY", "SELL", "DIVIDEND", "FEE", "TAX", "CASH_IN", "CASH_OUT"]
+_CURRENCIES   = ["EUR", "CZK", "USD", "GBP", "PLN"]
 _TICKER_TYPES = {"BUY", "SELL", "DIVIDEND"}
 _PRICE_TYPES  = {"BUY", "SELL"}
 
@@ -22,6 +21,10 @@ def open_add_trade_dialog(
     on_after_add: Callable[[], None],
 ) -> None:
     """Otevře modální dialog pro přidání transakce."""
+
+    # ── State ─────────────────────────────────────────────────────────────────
+    _recalculating   = [False]          # guard proti smyčce při programatickém plnění polí
+    _last_price_field = ["per_share"]   # "per_share" | "total" — zdroj posledního ručního zadání
 
     # ── Formulářové prvky ─────────────────────────────────────────────────────
 
@@ -40,30 +43,40 @@ def open_add_trade_dialog(
     )
 
     asset_tf = ft.TextField(
-        label="Ticker (např. AAPL)",
-        hint_text="AAPL, VOW3, IWDA...",
+        label="Ticker (např. ANET.US)",
+        hint_text="ANET.US, VOW3.DE, IWDA.IE...",
         width=180,
     )
 
     amount_tf = ft.TextField(
-        label="Množství / částka",
+        label="Množství",
         hint_text="Kladné číslo",
-        width=160,
+        width=140,
         keyboard_type=ft.KeyboardType.NUMBER,
     )
 
+    # EUR-centric pole — viditelná pouze pro BUY/SELL
+    eur_per_share_tf = ft.TextField(
+        label="EUR / ks",
+        hint_text="140.25",
+        width=165,
+        keyboard_type=ft.KeyboardType.NUMBER,
+    )
+
+    eur_total_tf = ft.TextField(
+        label="Celkem EUR",
+        hint_text="2 805.00",
+        width=175,
+        keyboard_type=ft.KeyboardType.NUMBER,
+    )
+
+    # Původní pole — viditelná pouze pro non-BUY/SELL typy
     currency_dd = ft.Dropdown(
         label="Měna",
         options=[ft.dropdown.Option(c) for c in _CURRENCIES],
         value="EUR",
         width=120,
-    )
-
-    price_tf = ft.TextField(
-        label="Cena / kus (volitelné)",
-        hint_text="150.25",
-        width=190,
-        keyboard_type=ft.KeyboardType.NUMBER,
+        visible=False,  # výchozí typ = BUY → skrytý
     )
 
     venue_tf = ft.TextField(
@@ -80,29 +93,93 @@ def open_add_trade_dialog(
 
     status_text = ft.Text("", size=13)
 
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
     def _set_status(msg: str, error: bool = False) -> None:
         status_text.value = msg
         status_text.color = ft.Colors.RED_400 if error else ft.Colors.GREEN_400
         page.update()
 
-    def _on_type_change(_e) -> None:
-        ttype = type_dd.value or "BUY"
-        if ttype in _TICKER_TYPES:
-            asset_tf.label = "Ticker (např. AAPL)"
-            asset_tf.hint_text = "AAPL, VOW3, IWDA..."
+    def _try_decimal(val: str) -> Optional[Decimal]:
+        try:
+            d = Decimal((val or "").strip().replace(",", "."))
+            return d if d > 0 else None
+        except (InvalidOperation, AttributeError):
+            return None
+
+    # ── Auto-výpočet EUR polí ─────────────────────────────────────────────────
+
+    def _recalc_total() -> None:
+        qty       = _try_decimal(amount_tf.value or "")
+        per_share = _try_decimal(eur_per_share_tf.value or "")
+        if qty and per_share:
+            _recalculating[0] = True
+            eur_total_tf.value = str(round(qty * per_share, 2))
+            page.update()
+            _recalculating[0] = False
+
+    def _recalc_per_share() -> None:
+        qty   = _try_decimal(amount_tf.value or "")
+        total = _try_decimal(eur_total_tf.value or "")
+        if qty and total:
+            _recalculating[0] = True
+            eur_per_share_tf.value = str(round(total / qty, 4))
+            page.update()
+            _recalculating[0] = False
+
+    def _on_per_share_change(_e) -> None:
+        if _recalculating[0]:
+            return
+        _last_price_field[0] = "per_share"
+        _recalc_total()
+
+    def _on_total_change(_e) -> None:
+        if _recalculating[0]:
+            return
+        _last_price_field[0] = "total"
+        _recalc_per_share()
+
+    def _on_qty_change(_e) -> None:
+        if type_dd.value not in _PRICE_TYPES:
+            return
+        if _last_price_field[0] == "per_share":
+            _recalc_total()
         else:
-            asset_tf.label = "Měna / Asset"
-            asset_tf.hint_text = "EUR, USD, CZK..."
-        price_tf.visible = ttype in _PRICE_TYPES
+            _recalc_per_share()
+
+    eur_per_share_tf.on_change = _on_per_share_change
+    eur_total_tf.on_change     = _on_total_change
+    amount_tf.on_change        = _on_qty_change
+
+    # ── Viditelnost polí při změně typu ──────────────────────────────────────
+
+    def _on_type_change(_e) -> None:
+        ttype       = type_dd.value or "BUY"
+        is_buy_sell = ttype in _PRICE_TYPES
+
+        asset_tf.label     = "Ticker (např. ANET.US)" if ttype in _TICKER_TYPES else "Měna / Asset"
+        asset_tf.hint_text = "ANET.US, VOW3.DE, IWDA.IE..." if ttype in _TICKER_TYPES else "EUR, USD, CZK..."
+
+        eur_per_share_tf.visible = is_buy_sell
+        eur_total_tf.visible     = is_buy_sell
+        currency_dd.visible      = not is_buy_sell
+
         status_text.value = ""
         page.update()
 
     type_dd.on_change = _on_type_change
 
+    # ── Zavření ───────────────────────────────────────────────────────────────
+
     def _close(_e=None) -> None:
         page.pop_dialog()
 
+    # ── Submit ────────────────────────────────────────────────────────────────
+
     def _on_submit(_e) -> None:
+        ttype       = type_dd.value or "BUY"
+        is_buy_sell = ttype in _PRICE_TYPES
+
         try:
             ts = datetime.fromisoformat(date_tf.value.strip())
         except (ValueError, AttributeError):
@@ -117,16 +194,6 @@ def open_add_trade_dialog(
             _set_status("Množství musí být kladné číslo (např. 10 nebo 1500.50)", error=True)
             return
 
-        price: Optional[Decimal] = None
-        if price_tf.visible and price_tf.value and price_tf.value.strip():
-            try:
-                price = Decimal(price_tf.value.strip().replace(",", "."))
-                if price < 0:
-                    raise ValueError
-            except (InvalidOperation, ValueError):
-                _set_status("Neplatná cena — zadej kladné číslo", error=True)
-                return
-
         asset = asset_tf.value.strip()
         venue = venue_tf.value.strip()
 
@@ -137,16 +204,45 @@ def open_add_trade_dialog(
             _set_status("Broker / venue nesmí být prázdný", error=True)
             return
 
-        req = AddTradeRequestDTO(
-            type=type_dd.value,
-            timestamp=ts,
-            asset=asset,
-            amount=amount,
-            currency=currency_dd.value,
-            price=price,
-            venue=venue,
-            note=note_tf.value.strip() or None,
-        )
+        if is_buy_sell:
+            # EUR-centric BUY/SELL — currency vždy EUR
+            eur_per_share = _try_decimal(eur_per_share_tf.value or "")
+            eur_total     = _try_decimal(eur_total_tf.value or "")
+
+            # Dopočet chybějícího pole při submitu
+            if eur_per_share and not eur_total:
+                eur_total = Decimal(str(round(amount * eur_per_share, 2)))
+            elif eur_total and not eur_per_share:
+                eur_per_share = Decimal(str(round(eur_total / amount, 4)))
+
+            if not eur_total or eur_total <= 0:
+                _set_status("Zadej EUR / ks nebo Celkem EUR", error=True)
+                return
+
+            req = AddTradeRequestDTO(
+                type=ttype,
+                timestamp=ts,
+                asset=asset,
+                amount=amount,
+                currency="EUR",
+                price=eur_per_share,
+                quote_amount=eur_total,
+                venue=venue,
+                note=note_tf.value.strip() or None,
+            )
+
+        else:
+            # Původní chování — DIVIDEND, FEE, TAX, CASH_IN, CASH_OUT
+            req = AddTradeRequestDTO(
+                type=ttype,
+                timestamp=ts,
+                asset=asset,
+                amount=amount,
+                currency=currency_dd.value,
+                price=None,
+                venue=venue,
+                note=note_tf.value.strip() or None,
+            )
 
         result: AddTradeResultDTO = add_trade(req, db_path)
 
@@ -156,6 +252,8 @@ def open_add_trade_dialog(
         else:
             _set_status(result.error_message or "Neznámá chyba", error=True)
 
+    # ── Layout ────────────────────────────────────────────────────────────────
+
     dlg = ft.AlertDialog(
         modal=True,
         title=ft.Text("Přidat transakci", weight=ft.FontWeight.BOLD, size=18),
@@ -163,9 +261,10 @@ def open_add_trade_dialog(
             width=580,
             content=ft.Column(
                 controls=[
-                    ft.Row([type_dd, date_tf], wrap=True, spacing=12),
-                    ft.Row([asset_tf, amount_tf, currency_dd], wrap=True, spacing=12),
-                    ft.Row([price_tf, venue_tf], wrap=True, spacing=12),
+                    ft.Row([type_dd, date_tf], spacing=12),
+                    ft.Row([asset_tf, amount_tf, currency_dd], spacing=12),
+                    ft.Row([eur_per_share_tf, eur_total_tf], spacing=12),
+                    venue_tf,
                     note_tf,
                     status_text,
                 ],
