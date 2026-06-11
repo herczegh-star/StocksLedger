@@ -20,24 +20,39 @@ _HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
 }
 
-# Explicitní aliasy: ledger ticker → Yahoo Finance ticker
+# Explicitní aliasy mají přednost před suffix mapováním
 _EXPLICIT_ALIASES: Dict[str, str] = {
     "BRKB.US": "BRK-B",
 }
 
+# XTB suffix → Yahoo Finance suffix
+# "" znamená strip (ANET.US → ANET); jinak nahradit (ABBN.CH → ABBN.SW)
+_SUFFIX_MAP: Dict[str, str] = {
+    ".US": "",    # NYSE/NASDAQ — strip (ANET.US → ANET)
+    ".CH": ".SW", # SIX Swiss Exchange (ABBN.CH → ABBN.SW)
+    ".UK": ".L",  # London Stock Exchange (ISLN.UK → ISLN.L)
+    ".DE": ".DE", # Xetra — beze změny (SAP.DE → SAP.DE)
+    ".FR": ".PA", # Euronext Paris
+    ".NL": ".AS", # Euronext Amsterdam
+    ".IT": ".MI", # Borsa Italiana
+    ".ES": ".MC", # Madrid
+}
+
 
 def _yf_ticker(ledger_ticker: str) -> str:
-    """Převede ledger ticker na Yahoo Finance ticker.
+    """Převede XTB ledger ticker na Yahoo Finance ticker.
 
     Pořadí:
       1. explicitní alias (_EXPLICIT_ALIASES)
-      2. strip .US suffix (ANET.US → ANET)
-      3. původní ticker jako fallback
+      2. suffix mapování (_SUFFIX_MAP): XTB přípona → YF přípona
+      3. původní ticker beze změny jako fallback
     """
     if ledger_ticker in _EXPLICIT_ALIASES:
         return _EXPLICIT_ALIASES[ledger_ticker]
-    if ledger_ticker.endswith(".US"):
-        return ledger_ticker[:-3]
+    for xtb_sfx, yf_sfx in _SUFFIX_MAP.items():
+        if ledger_ticker.endswith(xtb_sfx):
+            base = ledger_ticker[: -len(xtb_sfx)]
+            return base + yf_sfx
     return ledger_ticker
 
 
