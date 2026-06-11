@@ -159,7 +159,6 @@ def build_ledger_view(
         ]
 
         data_rows = []
-        seen_ids: set = set()
 
         for row in reversed(rows):
             ttype      = row.type
@@ -169,11 +168,7 @@ def build_ledger_view(
             ts_str     = row.timestamp.strftime("%Y-%m-%d %H:%M:%S")
             short_id   = (row.id or "")[:28] + ("…" if len(row.id or "") > 28 else "")
 
-            # Tlačítko smazat — zobrazit jen jednou na trade_id
-            show_delete = row.id not in seen_ids
-            if row.id:
-                seen_ids.add(row.id)
-
+            # Každý řádek má vlastní ⋮ tlačítko — delete vždy smaže celý trade_id.
             del_btn = ft.PopupMenuButton(
                 icon=ft.Icons.MORE_VERT,
                 icon_color=ft.Colors.GREY_500,
@@ -185,7 +180,7 @@ def build_ledger_view(
                         on_click=lambda _e, tid=row.id, tt=ttype: _confirm_delete(tid, tt),
                     ),
                 ],
-            ) if show_delete else ft.Text("")
+            )
 
             data_rows.append(ft.DataRow(
                 cells=[

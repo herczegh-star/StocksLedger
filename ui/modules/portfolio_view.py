@@ -127,6 +127,7 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
     _snap: list = [None]
     _sort = {"field": "roi", "asc": False}
     _names: list = [{}]
+    _gen: list = [0]   # generační čítač — chrání před stale background updates
 
     # ── KPI widgets ───────────────────────────────────────────────────────────
     w_val      = ft.Text("—", size=22, weight=ft.FontWeight.BOLD, color=T_MUT)
@@ -314,7 +315,7 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
         cards_col.controls.append(ft.Container(height=32))
 
     # ── Background price + name loading ──────────────────────────────────────
-    def _load_prices(snap: PortfolioSnapshotDTO) -> None:
+    def _load_prices(snap: PortfolioSnapshotDTO, gen: int) -> None:
         """Načte USD ceny + EUR/USD kurz, vypočte spot_eur, P&L a ROI. Aktualizuje UI."""
         from core.services.ticker_meta import fetch_names, load_names, save_names
 
@@ -381,6 +382,8 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
         )
 
         async def _ui_update() -> None:
+            if _gen[0] != gen:
+                return   # stale update — mezitím proběhl refresh (např. delete)
             _names[0] = current_names
             _snap[0] = enriched_snap
             _update_kpis()
@@ -393,6 +396,9 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
     def refresh() -> None:
         from core.services.ticker_meta import load_names
 
+        _gen[0] += 1
+        current_gen = _gen[0]
+
         snap = get_portfolio_snapshot(db_path)
         _snap[0] = snap
         _names[0] = load_names(db_path)
@@ -403,7 +409,9 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
         page.update()
 
         if snap.positions:
-            threading.Thread(target=lambda: _load_prices(snap), daemon=True).start()
+            threading.Thread(
+                target=lambda: _load_prices(snap, current_gen), daemon=True
+            ).start()
 
     # ── Layout ────────────────────────────────────────────────────────────────
     kpi_row = ft.Row(
