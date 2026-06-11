@@ -125,6 +125,44 @@ class PortfolioSnapshotDTO:
     total_roi: Optional[Decimal] = None        # M3.2+
 
 
+# ── P&L analytika ─────────────────────────────────────────────────────────────
+
+def enrich_with_pnl(pos: PositionDTO) -> PositionDTO:
+    """Doplní unrealized_pnl a roi pokud jsou cost_basis a position_value ve stejné měně.
+
+    Podmínky pro výpočet (všechny musí platit):
+      - position_value není None (cena byla načtena)
+      - spot_currency == pos.currency (měny sedí — žádný USD/EUR mismatch)
+      - cost_basis > 0 (ochrana před dělením nulou u roi)
+
+    Vrátí původní pos beze změny pokud podmínky nesplněny.
+    Ledger vrstva se nedotýká — čistá funkce nad DTO.
+    """
+    if (
+        pos.position_value is None
+        or pos.spot_currency is None
+        or pos.spot_currency != pos.currency
+        or pos.cost_basis <= _ZERO
+    ):
+        return pos
+
+    pnl = pos.position_value - pos.cost_basis
+    roi = pnl / pos.cost_basis  # desetinné číslo, ne %; UI zobrazí × 100
+
+    return PositionDTO(
+        ticker=pos.ticker,
+        quantity=pos.quantity,
+        wac=pos.wac,
+        cost_basis=pos.cost_basis,
+        currency=pos.currency,
+        spot_price=pos.spot_price,
+        spot_currency=pos.spot_currency,
+        position_value=pos.position_value,
+        unrealized_pnl=pnl,
+        roi=roi,
+    )
+
+
 # ── App context ────────────────────────────────────────────────────────────────
 
 def create_app_context(config_path=None) -> AppContextDTO:
