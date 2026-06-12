@@ -183,6 +183,7 @@ def open_add_trade_dialog(
         page.update()
 
     type_dd.on_change = _on_type_change
+    _on_type_change(None)  # nastav počáteční stav polí podle výchozího typu
 
     # ── Zavření ───────────────────────────────────────────────────────────────
 
