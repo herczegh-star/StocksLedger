@@ -183,13 +183,16 @@ def open_add_trade_dialog(
     def _on_type_change(_e) -> None:
         ttype = (getattr(_e, "data", None) or type_dd.value or "BUY")
         _apply_type(ttype)
-        status_text.value = f"Typ: {ttype}"   # DEBUG — dočasně, odstraníme po ověření
-        # Individuální .update() místo page.update() — Flet 0.85 dialog workaround
-        row_asset.update()
-        row_prices.update()
-        asset_tf.update()
-        amount_tf.update()
-        status_text.update()
+
+        # page.update() nefunguje ze synchronního on_change callbacku v Flet 0.85 dialog overlay.
+        # Workaround: spusť update přes run_task (async kontext) — stejný vzor jako portfolio_view.
+        async def _do_update() -> None:
+            row_asset.update()
+            row_prices.update()
+            asset_tf.update()
+            amount_tf.update()
+
+        page.run_task(_do_update)
 
     type_dd.on_change = _on_type_change
     _apply_type("BUY")  # nastav počáteční stav před show_dialog
