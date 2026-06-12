@@ -13,6 +13,7 @@ _TRADE_TYPES  = ["BUY", "SELL", "DIVIDEND", "FEE", "TAX", "CASH_IN", "CASH_OUT"]
 _CURRENCIES   = ["EUR", "CZK", "USD", "GBP", "PLN"]
 _TICKER_TYPES = {"BUY", "SELL", "DIVIDEND"}
 _PRICE_TYPES  = {"BUY", "SELL"}
+_CASH_TYPES   = {"CASH_IN", "CASH_OUT"}
 
 
 def open_add_trade_dialog(
@@ -156,13 +157,27 @@ def open_add_trade_dialog(
     def _on_type_change(_e) -> None:
         ttype       = type_dd.value or "BUY"
         is_buy_sell = ttype in _PRICE_TYPES
+        is_cash     = ttype in _CASH_TYPES
 
-        asset_tf.label     = "Ticker (např. ANET.US)" if ttype in _TICKER_TYPES else "Měna / Asset"
-        asset_tf.hint_text = "ANET.US, VOW3.DE, IWDA.IE..." if ttype in _TICKER_TYPES else "EUR, USD, CZK..."
+        if ttype in _TICKER_TYPES:
+            asset_tf.label     = "Ticker (např. ANET.US)"
+            asset_tf.hint_text = "ANET.US, VOW3.DE, IWDA.IE..."
+        elif is_cash:
+            asset_tf.label     = "Měna"
+            asset_tf.hint_text = "EUR"
+            if not asset_tf.value:
+                asset_tf.value = "EUR"
+        else:
+            asset_tf.label     = "Měna / Asset"
+            asset_tf.hint_text = "EUR, USD, CZK..."
+
+        amount_tf.label     = "Částka"    if is_cash else "Množství"
+        amount_tf.hint_text = "1 037.94"  if is_cash else "Kladné číslo"
 
         eur_per_share_tf.visible = is_buy_sell
         eur_total_tf.visible     = is_buy_sell
-        currency_dd.visible      = not is_buy_sell
+        # cash: měna je shodná s asset_tf → currency_dd nepotřeba
+        currency_dd.visible      = not is_buy_sell and not is_cash
 
         status_text.value = ""
         page.update()
@@ -232,13 +247,15 @@ def open_add_trade_dialog(
             )
 
         else:
-            # Původní chování — DIVIDEND, FEE, TAX, CASH_IN, CASH_OUT
+            # DIVIDEND, FEE, TAX: currency z dropdownu
+            # CASH_IN, CASH_OUT: currency = asset (obě jsou stejná měna)
+            currency = asset if ttype in _CASH_TYPES else currency_dd.value
             req = AddTradeRequestDTO(
                 type=ttype,
                 timestamp=ts,
                 asset=asset,
                 amount=amount,
-                currency=currency_dd.value,
+                currency=currency,
                 price=None,
                 venue=venue,
                 note=note_tf.value.strip() or None,
