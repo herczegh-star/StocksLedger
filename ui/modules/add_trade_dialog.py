@@ -155,7 +155,8 @@ def open_add_trade_dialog(
     # ── Viditelnost polí při změně typu ──────────────────────────────────────
 
     def _on_type_change(_e) -> None:
-        ttype       = type_dd.value or "BUY"
+        # e.data je nová hodnota při user-akci; None při init volání
+        ttype = (getattr(_e, "data", None) or type_dd.value or "BUY")
         is_buy_sell = ttype in _PRICE_TYPES
         is_cash     = ttype in _CASH_TYPES
 
@@ -171,19 +172,19 @@ def open_add_trade_dialog(
             asset_tf.label     = "Měna / Asset"
             asset_tf.hint_text = "EUR, USD, CZK..."
 
-        amount_tf.label     = "Částka"    if is_cash else "Množství"
-        amount_tf.hint_text = "1 037.94"  if is_cash else "Kladné číslo"
+        amount_tf.label     = "Částka"   if is_cash else "Množství"
+        amount_tf.hint_text = "1 037.94" if is_cash else "Kladné číslo"
 
         eur_per_share_tf.visible = is_buy_sell
         eur_total_tf.visible     = is_buy_sell
-        # cash: měna je shodná s asset_tf → currency_dd nepotřeba
         currency_dd.visible      = not is_buy_sell and not is_cash
 
         status_text.value = ""
-        page.update()
+        if _e is not None:   # dialog není ještě na stránce při init → nevolej update
+            page.update()
 
     type_dd.on_change = _on_type_change
-    _on_type_change(None)  # nastav počáteční stav polí podle výchozího typu
+    _on_type_change(None)  # nastav počáteční stav polí (před show_dialog)
 
     # ── Zavření ───────────────────────────────────────────────────────────────
 
