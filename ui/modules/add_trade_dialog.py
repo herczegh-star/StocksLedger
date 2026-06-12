@@ -194,8 +194,6 @@ def open_add_trade_dialog(
 
     def _on_type_change(_e) -> None:
         new_type = getattr(_e, "data", None) or type_dd.value or "BUY"
-        # Flet 0.85 neumí aktualizovat obsah AlertDialog po jeho otevření.
-        # Řešení: zavři dialog, znovu otevři s novým typem a uloženými hodnotami.
         saved = {
             "date":   date_tf.value,
             "asset":  asset_tf.value,
@@ -203,13 +201,11 @@ def open_add_trade_dialog(
             "venue":  venue_tf.value,
             "note":   note_tf.value,
         }
-
-        async def _reopen() -> None:
-            page.pop_dialog()
-            open_add_trade_dialog(page, db_path, on_after_add,
-                                  _initial_type=new_type, _saved=saved)
-
-        page.run_task(_reopen)
+        # Synchronní close+reopen — run_task ani page.update() nefungují
+        # z dialog event callbacků v Flet 0.85.
+        page.pop_dialog()
+        open_add_trade_dialog(page, db_path, on_after_add,
+                              _initial_type=new_type, _saved=saved)
 
     type_dd.on_change = _on_type_change
     _apply_type(_initial_type)  # nastav počáteční stav před show_dialog
