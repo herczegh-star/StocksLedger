@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import List
+from typing import Dict, List
 
 from core.model import RawRow
 
@@ -98,3 +98,28 @@ def compute_holdings(rows: List[RawRow]) -> List[HoldingRaw]:
             ))
 
     return result
+
+
+def compute_cash_balance(rows: List[RawRow]) -> Dict[str, Decimal]:
+    """Vrátí zůstatky FIAT měn odvozené z ledger rows. Čistá funkce.
+
+    Sečte amounts pro všechny non-reversed FIAT asset rows:
+      CASH_IN / CASH_OUT, EUR nožičky BUY/SELL, DIVIDEND, FEE, TAX.
+    Vrátí pouze kladné zůstatky (záporné = přečerpání, neočekáváno).
+    """
+    reversed_ids: set = set()
+    for r in rows:
+        if r.type == "REVERSAL" and r.note and r.note.startswith(_REV_PREFIX):
+            reversed_ids.add(r.note[len(_REV_PREFIX):])
+
+    balances: Dict[str, Decimal] = {}
+    for r in rows:
+        if r.type == "REVERSAL":
+            continue
+        if r.id in reversed_ids:
+            continue
+        if r.asset not in FIAT:
+            continue
+        balances[r.asset] = balances.get(r.asset, _ZERO) + r.amount
+
+    return {k: v.normalize() for k, v in balances.items() if v > _EPSILON}

@@ -131,7 +131,8 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
 
     # ── KPI widgets ───────────────────────────────────────────────────────────
     w_val      = ft.Text("—", size=22, weight=ft.FontWeight.BOLD, color=T_MUT)
-    w_invested = ft.Text("", size=11, color=T_MUT)   # "Net Invested: X EUR" sekundárně
+    w_invested = ft.Text("", size=11, color=T_MUT)   # "Net Invested: X EUR"
+    w_cash     = ft.Text("", size=11, color=T_MUT)   # "Free Cash: X EUR"
     w_pnl      = ft.Text("—", size=22, weight=ft.FontWeight.BOLD, color=T_MUT)
     w_roi      = ft.Text("—", size=22, weight=ft.FontWeight.BOLD, color=T_MUT)
 
@@ -159,10 +160,15 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
         if s is None:
             return
 
-        # Portfolio Value
+        cash_eur = s.cash_by_currency.get("EUR", Decimal("0"))
+
+        # Portfolio Value = pozice + cash EUR
         if s.portfolio_value is not None:
-            w_val.value = _fmt_price(s.portfolio_value, "EUR")
+            w_val.value = _fmt_price(s.portfolio_value + cash_eur, "EUR")
             w_val.color = T_PRI
+        elif cash_eur > Decimal("0"):
+            w_val.value = _fmt_price(cash_eur, "EUR")  # ceny ještě nenačteny
+            w_val.color = T_MUT
         else:
             w_val.value = "—"
             w_val.color = T_MUT
@@ -171,11 +177,14 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
         currency = s.positions[0].currency if s.positions else "EUR"
         w_invested.value = f"Net Invested: {_fmt_price(s.total_cost_basis, currency)}"
 
+        # Free Cash (sekundární text)
+        w_cash.value = f"Free Cash: {_fmt_price(cash_eur, 'EUR')}" if cash_eur > Decimal("0") else ""
+
         # Unrealized P&L
         w_pnl.value = _fmt_pnl(s.total_pnl, "EUR")
         w_pnl.color = _pnl_color(s.total_pnl)
 
-        # ROI %
+        # ROI % — pouze z investovaných pozic, nezahrnuje cash
         w_roi.value = _fmt_roi(s.total_roi)
         w_roi.color = _pnl_color(s.total_roi)
 
@@ -379,6 +388,7 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
             portfolio_value=portfolio_value if portfolio_value > 0 else None,
             total_pnl=total_pnl,
             total_roi=total_roi,
+            cash_by_currency=snap.cash_by_currency,  # cash nevyžaduje internet — přenést beze změny
         )
 
         async def _ui_update() -> None:
@@ -416,7 +426,7 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
     # ── Layout ────────────────────────────────────────────────────────────────
     kpi_row = ft.Row(
         [
-            _kpi_box("Portfolio Value", w_val, w_invested),
+            _kpi_box("Portfolio Value", w_val, w_invested, w_cash),
             _kpi_box("Unrealized P&L", w_pnl),
             _kpi_box("ROI",            w_roi),
         ],

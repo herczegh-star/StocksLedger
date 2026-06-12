@@ -21,10 +21,10 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -120,9 +120,10 @@ class PortfolioSnapshotDTO:
     """Snapshot portfolia odvozený čistě z ledgeru + volitelných cen."""
     positions: List[PositionDTO]
     total_cost_basis: Decimal
-    portfolio_value: Optional[Decimal] = None  # součet position_value kde cena dostupná
-    total_pnl: Optional[Decimal] = None        # M3.2+
-    total_roi: Optional[Decimal] = None        # M3.2+
+    portfolio_value: Optional[Decimal] = None              # součet position_value kde cena dostupná
+    total_pnl: Optional[Decimal] = None                    # M3.2+
+    total_roi: Optional[Decimal] = None                    # M3.2+
+    cash_by_currency: Dict[str, Decimal] = field(default_factory=dict)  # volné prostředky dle měny
 
 
 # ── P&L analytika ─────────────────────────────────────────────────────────────
@@ -336,10 +337,11 @@ def get_portfolio_snapshot(db_path: str) -> PortfolioSnapshotDTO:
     Ceny (spot_price, value, unrealized_pnl, roi) jsou None — obohacení
     probíhá volitelně v UI vrstvě přes price_provider na pozadí.
     """
-    from core.services.holdings_engine import compute_holdings
+    from core.services.holdings_engine import compute_cash_balance, compute_holdings
 
     rows = get_ledger_rows(db_path)
     holdings = compute_holdings(rows)
+    cash = compute_cash_balance(rows)
 
     positions: List[PositionDTO] = []
     total_cost = Decimal("0")
@@ -357,6 +359,7 @@ def get_portfolio_snapshot(db_path: str) -> PortfolioSnapshotDTO:
     return PortfolioSnapshotDTO(
         positions=positions,
         total_cost_basis=total_cost,
+        cash_by_currency=cash,
     )
 
 
