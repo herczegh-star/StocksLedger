@@ -20,8 +20,14 @@ def open_add_trade_dialog(
     page: ft.Page,
     db_path: str,
     on_after_add: Callable[[], None],
+    _initial_type: str = "BUY",
+    _saved: Optional[dict] = None,
 ) -> None:
-    """Otevře modální dialog pro přidání transakce."""
+    """Otevře modální dialog pro přidání transakce.
+
+    _initial_type: výchozí typ transakce (při re-otevření po změně typu)
+    _saved: uložené hodnoty polí z předchozí instance dialogu
+    """
 
     # ── State ─────────────────────────────────────────────────────────────────
     _recalculating   = [False]          # guard proti smyčce při programatickém plnění polí
@@ -29,29 +35,33 @@ def open_add_trade_dialog(
 
     # ── Formulářové prvky ─────────────────────────────────────────────────────
 
+    _s = _saved or {}
+
     type_dd = ft.Dropdown(
         label="Typ transakce",
         options=[ft.dropdown.Option(t) for t in _TRADE_TYPES],
-        value="BUY",
+        value=_initial_type,
         width=200,
     )
 
     date_tf = ft.TextField(
         label="Datum a čas",
         hint_text="2024-01-15 10:30:00",
-        value=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        value=_s.get("date", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
         width=230,
     )
 
     asset_tf = ft.TextField(
         label="Ticker (např. ANET.US)",
         hint_text="ANET.US, VOW3.DE, IWDA.IE...",
+        value=_s.get("asset", ""),
         width=180,
     )
 
     amount_tf = ft.TextField(
         label="Množství",
         hint_text="Kladné číslo",
+        value=_s.get("amount", ""),
         width=140,
         keyboard_type=ft.KeyboardType.NUMBER,
     )
@@ -86,11 +96,13 @@ def open_add_trade_dialog(
     venue_tf = ft.TextField(
         label="Broker / Venue",
         hint_text="xtb, degiro, ibkr...",
+        value=_s.get("venue", ""),
         width=180,
     )
 
     note_tf = ft.TextField(
         label="Poznámka (volitelné)",
+        value=_s.get("note", ""),
         width=380,
         hint_text="Volitelný komentář",
     )
@@ -181,21 +193,26 @@ def open_add_trade_dialog(
         row_prices.controls = [eur_per_share_tf, eur_total_tf] if is_buy_sell else []
 
     def _on_type_change(_e) -> None:
-        ttype = (getattr(_e, "data", None) or type_dd.value or "BUY")
-        _apply_type(ttype)
+        new_type = getattr(_e, "data", None) or type_dd.value or "BUY"
+        # Flet 0.85 neumí aktualizovat obsah AlertDialog po jeho otevření.
+        # Řešení: zavři dialog, znovu otevři s novým typem a uloženými hodnotami.
+        saved = {
+            "date":   date_tf.value,
+            "asset":  asset_tf.value,
+            "amount": amount_tf.value,
+            "venue":  venue_tf.value,
+            "note":   note_tf.value,
+        }
 
-        # page.update() nefunguje ze synchronního on_change callbacku v Flet 0.85 dialog overlay.
-        # Workaround: spusť update přes run_task (async kontext) — stejný vzor jako portfolio_view.
-        async def _do_update() -> None:
-            row_asset.update()
-            row_prices.update()
-            asset_tf.update()
-            amount_tf.update()
+        async def _reopen() -> None:
+            page.pop_dialog()
+            open_add_trade_dialog(page, db_path, on_after_add,
+                                  _initial_type=new_type, _saved=saved)
 
-        page.run_task(_do_update)
+        page.run_task(_reopen)
 
     type_dd.on_change = _on_type_change
-    _apply_type("BUY")  # nastav počáteční stav před show_dialog
+    _apply_type(_initial_type)  # nastav počáteční stav před show_dialog
 
     # ── Zavření ───────────────────────────────────────────────────────────────
 
@@ -314,11 +331,3 @@ def open_add_trade_dialog(
         actions_alignment=ft.MainAxisAlignment.END,
     )
     page.show_dialog(dlg)
-
-    async def _sync_after_open() -> None:
-        """Synchronizuj stav formuláře po otevření dialogu (Flet může mít zapamatovaný typ)."""
-        _apply_type(type_dd.value or "BUY")
-        row_asset.update()
-        row_prices.update()
-
-    page.run_task(_sync_after_open)
