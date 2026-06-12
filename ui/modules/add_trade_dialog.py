@@ -157,8 +157,8 @@ def open_add_trade_dialog(
 
     # ── Viditelnost polí při změně typu ──────────────────────────────────────
 
-    def _on_type_change(_e) -> None:
-        ttype       = (getattr(_e, "data", None) or type_dd.value or "BUY")
+    def _apply_type(ttype: str) -> None:
+        """Aplikuje stav formuláře pro daný typ — voláno z on_change i z inicializace."""
         is_buy_sell = ttype in _PRICE_TYPES
         is_cash     = ttype in _CASH_TYPES
 
@@ -177,16 +177,22 @@ def open_add_trade_dialog(
         amount_tf.label     = "Částka"   if is_cash else "Množství"
         amount_tf.hint_text = "1 037.94" if is_cash else "Kladné číslo"
 
-        # Přestav controls list — spolehlivější než widget.visible v Flet 0.85 dialozích
         row_asset.controls  = [asset_tf, amount_tf] + ([currency_dd] if (not is_buy_sell and not is_cash) else [])
         row_prices.controls = [eur_per_share_tf, eur_total_tf] if is_buy_sell else []
 
-        status_text.value = ""
-        if _e is not None:
-            page.update()
+    def _on_type_change(_e) -> None:
+        ttype = (getattr(_e, "data", None) or type_dd.value or "BUY")
+        _apply_type(ttype)
+        status_text.value = f"Typ: {ttype}"   # DEBUG — dočasně, odstraníme po ověření
+        # Individuální .update() místo page.update() — Flet 0.85 dialog workaround
+        row_asset.update()
+        row_prices.update()
+        asset_tf.update()
+        amount_tf.update()
+        status_text.update()
 
     type_dd.on_change = _on_type_change
-    _on_type_change(None)  # nastav počáteční stav řádků před show_dialog
+    _apply_type("BUY")  # nastav počáteční stav před show_dialog
 
     # ── Zavření ───────────────────────────────────────────────────────────────
 
@@ -305,3 +311,11 @@ def open_add_trade_dialog(
         actions_alignment=ft.MainAxisAlignment.END,
     )
     page.show_dialog(dlg)
+
+    async def _sync_after_open() -> None:
+        """Synchronizuj stav formuláře po otevření dialogu (Flet může mít zapamatovaný typ)."""
+        _apply_type(type_dd.value or "BUY")
+        row_asset.update()
+        row_prices.update()
+
+    page.run_task(_sync_after_open)
