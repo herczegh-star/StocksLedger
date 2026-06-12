@@ -5,11 +5,15 @@ Ceny a P&L se načítají na pozadí (yfinance → EUR přes EURUSD kurz).
 """
 from __future__ import annotations
 
+import logging
 import threading
+import time
 from decimal import Decimal
 from typing import Dict, List, Optional
 
 import flet as ft
+
+logger = logging.getLogger(__name__)
 
 from core.services.ui_facade import PortfolioSnapshotDTO, PositionDTO, get_portfolio_snapshot
 
@@ -326,20 +330,24 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
     # ── Background price + name loading ──────────────────────────────────────
     def _load_prices(snap: PortfolioSnapshotDTO, gen: int) -> None:
         """Načte USD ceny + EUR/USD kurz, vypočte spot_eur, P&L a ROI. Aktualizuje UI."""
-        from core.services.ticker_meta import fetch_names, load_names, save_names
+        from core.services.ticker_meta import fetch_names, save_names
 
         tickers = [p.ticker for p in snap.positions]
 
         try:
             from core.services.price_provider import fetch_eurusd, fetch_prices
             from core.services.ui_facade import enrich_with_pnl
+            t_p = time.perf_counter()
             prices_usd = fetch_prices(tickers)
+            logger.debug("prices fetch: %.1f ms (%d tickerů)", (time.perf_counter() - t_p) * 1000, len(tickers))
+            t_fx = time.perf_counter()
             eurusd = fetch_eurusd()
+            logger.debug("eurusd fetch: %.1f ms", (time.perf_counter() - t_fx) * 1000)
         except Exception:
             prices_usd = {}
             eurusd = None
 
-        current_names: Dict[str, str] = load_names(db_path)
+        current_names: Dict[str, str] = dict(_names[0])  # already loaded in refresh()
         unknown = [t for t in tickers if t not in current_names]
         if unknown:
             new_names = fetch_names(unknown)
@@ -409,14 +417,19 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
         _gen[0] += 1
         current_gen = _gen[0]
 
+        t0 = time.perf_counter()
         snap = get_portfolio_snapshot(db_path)
+        logger.debug("snapshot: %.1f ms", (time.perf_counter() - t0) * 1000)
+
         _snap[0] = snap
         _names[0] = load_names(db_path)
 
+        t1 = time.perf_counter()
         _update_kpis()
         _build_pills()
         _build_cards()
         page.update()
+        logger.debug("UI render: %.1f ms", (time.perf_counter() - t1) * 1000)
 
         if snap.positions:
             threading.Thread(
