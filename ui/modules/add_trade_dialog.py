@@ -56,7 +56,7 @@ def open_add_trade_dialog(
         keyboard_type=ft.KeyboardType.NUMBER,
     )
 
-    # EUR-centric pole — viditelná pouze pro BUY/SELL
+    # EUR-centric pole — zobrazena pouze pro BUY/SELL (přes controls list)
     eur_per_share_tf = ft.TextField(
         label="EUR / ks",
         hint_text="140.25",
@@ -71,14 +71,17 @@ def open_add_trade_dialog(
         keyboard_type=ft.KeyboardType.NUMBER,
     )
 
-    # Původní pole — viditelná pouze pro non-BUY/SELL typy
+    # Měna — zobrazena pouze pro DIVIDEND/FEE/TAX
     currency_dd = ft.Dropdown(
         label="Měna",
         options=[ft.dropdown.Option(c) for c in _CURRENCIES],
         value="EUR",
         width=120,
-        visible=False,  # výchozí typ = BUY → skrytý
     )
+
+    # Dynamické řádky — controls list se přestavuje podle typu transakce
+    row_asset  = ft.Row(spacing=12)   # asset_tf + amount_tf [+ currency_dd]
+    row_prices = ft.Row(spacing=12)   # eur_per_share_tf + eur_total_tf (jen BUY/SELL)
 
     venue_tf = ft.TextField(
         label="Broker / Venue",
@@ -155,8 +158,7 @@ def open_add_trade_dialog(
     # ── Viditelnost polí při změně typu ──────────────────────────────────────
 
     def _on_type_change(_e) -> None:
-        # e.data je nová hodnota při user-akci; None při init volání
-        ttype = (getattr(_e, "data", None) or type_dd.value or "BUY")
+        ttype       = (getattr(_e, "data", None) or type_dd.value or "BUY")
         is_buy_sell = ttype in _PRICE_TYPES
         is_cash     = ttype in _CASH_TYPES
 
@@ -175,16 +177,16 @@ def open_add_trade_dialog(
         amount_tf.label     = "Částka"   if is_cash else "Množství"
         amount_tf.hint_text = "1 037.94" if is_cash else "Kladné číslo"
 
-        eur_per_share_tf.visible = is_buy_sell
-        eur_total_tf.visible     = is_buy_sell
-        currency_dd.visible      = not is_buy_sell and not is_cash
+        # Přestav controls list — spolehlivější než widget.visible v Flet 0.85 dialozích
+        row_asset.controls  = [asset_tf, amount_tf] + ([currency_dd] if (not is_buy_sell and not is_cash) else [])
+        row_prices.controls = [eur_per_share_tf, eur_total_tf] if is_buy_sell else []
 
         status_text.value = ""
-        if _e is not None:   # dialog není ještě na stránce při init → nevolej update
+        if _e is not None:
             page.update()
 
     type_dd.on_change = _on_type_change
-    _on_type_change(None)  # nastav počáteční stav polí (před show_dialog)
+    _on_type_change(None)  # nastav počáteční stav řádků před show_dialog
 
     # ── Zavření ───────────────────────────────────────────────────────────────
 
@@ -281,8 +283,8 @@ def open_add_trade_dialog(
             content=ft.Column(
                 controls=[
                     ft.Row([type_dd, date_tf], spacing=12),
-                    ft.Row([asset_tf, amount_tf, currency_dd], spacing=12),
-                    ft.Row([eur_per_share_tf, eur_total_tf], spacing=12),
+                    row_asset,
+                    row_prices,
                     venue_tf,
                     note_tf,
                     status_text,
