@@ -100,6 +100,23 @@ def compute_holdings(rows: List[RawRow]) -> List[HoldingRaw]:
     return result
 
 
+def compute_net_deposits(rows: List[RawRow]) -> Dict[str, Decimal]:
+    """Vrátí čisté vklady (CASH_IN - CASH_OUT) per měna. Nezahrnuje BUY/SELL legs."""
+    _CASH_TYPES = frozenset({"CASH_IN", "CASH_OUT"})
+    reversed_ids: set = set()
+    for r in rows:
+        if r.type == "REVERSAL" and r.note and r.note.startswith(_REV_PREFIX):
+            reversed_ids.add(r.note[len(_REV_PREFIX):])
+    balances: Dict[str, Decimal] = {}
+    for r in rows:
+        if r.type not in _CASH_TYPES:
+            continue
+        if r.id in reversed_ids:
+            continue
+        balances[r.asset] = balances.get(r.asset, _ZERO) + r.amount
+    return {k: v.normalize() for k, v in balances.items() if abs(v) > _EPSILON}
+
+
 def compute_cash_balance(rows: List[RawRow]) -> Dict[str, Decimal]:
     """Vrátí zůstatky FIAT měn odvozené z ledger rows. Čistá funkce.
 

@@ -123,7 +123,8 @@ class PortfolioSnapshotDTO:
     portfolio_value: Optional[Decimal] = None              # součet position_value kde cena dostupná
     total_pnl: Optional[Decimal] = None                    # M3.2+
     total_roi: Optional[Decimal] = None                    # M3.2+
-    cash_by_currency: Dict[str, Decimal] = field(default_factory=dict)  # volné prostředky dle měny
+    cash_by_currency: Dict[str, Decimal] = field(default_factory=dict)          # net FIAT (vč. BUY legs)
+    net_deposits_by_currency: Dict[str, Decimal] = field(default_factory=dict)  # jen CASH_IN - CASH_OUT
 
 
 # ── P&L analytika ─────────────────────────────────────────────────────────────
@@ -337,11 +338,12 @@ def get_portfolio_snapshot(db_path: str) -> PortfolioSnapshotDTO:
     Ceny (spot_price, value, unrealized_pnl, roi) jsou None — obohacení
     probíhá volitelně v UI vrstvě přes price_provider na pozadí.
     """
-    from core.services.holdings_engine import compute_cash_balance, compute_holdings
+    from core.services.holdings_engine import compute_cash_balance, compute_holdings, compute_net_deposits
 
     rows = get_ledger_rows(db_path)
     holdings = compute_holdings(rows)
     cash = compute_cash_balance(rows)
+    deposits = compute_net_deposits(rows)
 
     positions: List[PositionDTO] = []
     total_cost = Decimal("0")
@@ -360,6 +362,7 @@ def get_portfolio_snapshot(db_path: str) -> PortfolioSnapshotDTO:
         positions=positions,
         total_cost_basis=total_cost,
         cash_by_currency=cash,
+        net_deposits_by_currency=deposits,
     )
 
 

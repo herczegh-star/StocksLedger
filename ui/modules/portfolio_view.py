@@ -17,13 +17,14 @@ logger = logging.getLogger(__name__)
 
 from core.services.ui_facade import PortfolioSnapshotDTO, PositionDTO, get_portfolio_snapshot
 
-BG_CARD = "#0f1621"
-BORDER  = "#1e293b"
-T_PRI   = "#e2e8f0"
-T_MUT   = "#7b8799"
-BLUE    = "#1d4ed8"
-GREEN   = "#22c55e"
-RED     = "#ef4444"
+BG_CARD  = "#0f1621"
+BORDER   = "#1e293b"
+T_PRI    = "#e2e8f0"
+T_MUT    = "#7b8799"
+BLUE     = "#1d4ed8"
+BLUE_300 = "#93c5fd"
+GREEN    = "#22c55e"
+RED      = "#ef4444"
 
 _SORT_FIELDS = [
     ("roi",  "ROI %"),
@@ -164,14 +165,15 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
         if s is None:
             return
 
-        cash_eur = s.cash_by_currency.get("EUR", Decimal("0"))
+        deposits_eur = s.net_deposits_by_currency.get("EUR", Decimal("0"))  # CASH_IN − CASH_OUT
 
-        # Portfolio Value = pozice + cash EUR
+        # Portfolio Value = hodnota pozic + čisté vklady (CASH_IN − CASH_OUT)
         if s.portfolio_value is not None:
-            w_val.value = _fmt_price(s.portfolio_value + cash_eur, "EUR")
+            total = s.portfolio_value + deposits_eur
+            w_val.value = _fmt_price(total, "EUR")
             w_val.color = T_PRI
-        elif cash_eur > Decimal("0"):
-            w_val.value = _fmt_price(cash_eur, "EUR")  # ceny ještě nenačteny
+        elif deposits_eur > Decimal("0"):
+            w_val.value = _fmt_price(deposits_eur, "EUR")
             w_val.color = T_MUT
         else:
             w_val.value = "—"
@@ -181,8 +183,12 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
         currency = s.positions[0].currency if s.positions else "EUR"
         w_invested.value = f"Net Invested: {_fmt_price(s.total_cost_basis, currency)}"
 
-        # Free Cash (sekundární text)
-        w_cash.value = f"Free Cash: {_fmt_price(cash_eur, 'EUR')}" if cash_eur > Decimal("0") else ""
+        # Net Deposits (CASH_IN − CASH_OUT, sekundární text pod Portfolio Value)
+        if deposits_eur != Decimal("0"):
+            w_cash.value = f"Deposits: {_fmt_price(deposits_eur, 'EUR')}"
+            w_cash.color = BLUE_300
+        else:
+            w_cash.value = ""
 
         # Unrealized P&L
         w_pnl.value = _fmt_pnl(s.total_pnl, "EUR")
@@ -311,21 +317,21 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
     # ── Cards build ───────────────────────────────────────────────────────────
     def _build_cards() -> None:
         s: Optional[PortfolioSnapshotDTO] = _snap[0]
-        if s is None or not s.positions:
-            cards_col.controls = [
-                ft.Container(
-                    content=ft.Text(
-                        "Žádné pozice. Přidej první BUY transakci.",
-                        size=14, color=T_MUT,
-                    ),
-                    padding=ft.Padding.all(32),
-                )
-            ]
-            return
+        controls = []
 
-        sorted_pos = _sort_positions(s.positions, _sort["field"], _sort["asc"])
-        cards_col.controls = [_make_card(p) for p in sorted_pos]
-        cards_col.controls.append(ft.Container(height=32))
+        # Akciové pozice
+        if s and s.positions:
+            sorted_pos = _sort_positions(s.positions, _sort["field"], _sort["asc"])
+            controls.extend([_make_card(p) for p in sorted_pos])
+        elif not controls:
+            controls.append(ft.Container(
+                content=ft.Text("Žádné pozice. Přidej BUY nebo CASH IN transakci.",
+                                size=14, color=T_MUT),
+                padding=ft.Padding.all(32),
+            ))
+
+        controls.append(ft.Container(height=32))
+        cards_col.controls = controls
 
     # ── Background price + name loading ──────────────────────────────────────
     def _load_prices(snap: PortfolioSnapshotDTO, gen: int) -> None:
@@ -396,7 +402,8 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
             portfolio_value=portfolio_value if portfolio_value > 0 else None,
             total_pnl=total_pnl,
             total_roi=total_roi,
-            cash_by_currency=snap.cash_by_currency,  # cash nevyžaduje internet — přenést beze změny
+            cash_by_currency=snap.cash_by_currency,
+            net_deposits_by_currency=snap.net_deposits_by_currency,
         )
 
         async def _ui_update() -> None:
