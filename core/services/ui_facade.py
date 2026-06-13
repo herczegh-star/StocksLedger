@@ -24,7 +24,10 @@ import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
-from typing import Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
+
+if TYPE_CHECKING:
+    from core.services.reentry_engine import SellEventRaw
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +130,30 @@ class PortfolioSnapshotDTO:
     net_deposits_by_currency: Dict[str, Decimal] = field(default_factory=dict)  # jen CASH_IN - CASH_OUT
 
 
+@dataclass
+class HarvestCandidateDTO:
+    """SellEventRaw obohacený o aktuální spot cenu a simulaci rebuye.
+
+    Všechna simulační pole jsou None pokud spot_eur nebyl načten.
+    Enrichment provádí enrich_candidate() — čistá funkce, žádné I/O.
+    """
+    sell_event:     SellEventRaw
+    spot_eur:       Optional[Decimal] = None   # aktuální EUR cena tickeru
+    rebuy_price:    Optional[Decimal] = None   # spot_eur × (1 + spread_buffer_pct / 100)
+    effective_cash: Optional[Decimal] = None   # released_eur × (1 − fee_pct / 100)
+    rebuy_qty:      Optional[Decimal] = None   # effective_cash / rebuy_price
+    extra_shares:   Optional[Decimal] = None   # rebuy_qty − sell_qty
+    efficiency_pct: Optional[Decimal] = None   # extra_shares / sell_qty × 100
+    is_alert:       bool = False               # efficiency_pct >= threshold_pct
+
+
+@dataclass
+class ReEntrySnapshotDTO:
+    """Snapshot Re-entry Watch kandidátů odvozených z ledgeru."""
+    candidates:    List[HarvestCandidateDTO]
+    threshold_pct: Decimal = field(default_factory=lambda: Decimal("10"))
+
+
 # ── P&L analytika ─────────────────────────────────────────────────────────────
 
 def enrich_with_pnl(pos: PositionDTO) -> PositionDTO:
@@ -162,6 +189,63 @@ def enrich_with_pnl(pos: PositionDTO) -> PositionDTO:
         position_value=pos.position_value,
         unrealized_pnl=pnl,
         roi=roi,
+    )
+
+
+# ── Re-entry simulation ───────────────────────────────────────────────────────
+
+_HUNDRED = Decimal("100")
+
+
+def enrich_candidate(
+    sell_event: SellEventRaw,
+    spot_eur:          Optional[Decimal],
+    threshold_pct:     Decimal = Decimal("10"),
+    spread_buffer_pct: Decimal = Decimal("0.5"),
+    fee_pct:           Decimal = Decimal("0.1"),
+) -> HarvestCandidateDTO:
+    """Obohať SellEventRaw o simulaci rebuye na základě aktuální EUR ceny.
+
+    Vzorce:
+      rebuy_price    = spot_eur × (1 + spread_buffer_pct / 100)
+      effective_cash = released_eur × (1 − fee_pct / 100)
+      rebuy_qty      = effective_cash / rebuy_price
+      extra_shares   = rebuy_qty − sell_qty
+      efficiency_pct = extra_shares / sell_qty × 100
+      is_alert       = efficiency_pct >= threshold_pct
+
+    Vrátí unenriched DTO (všechna simulační pole None) pokud:
+      - spot_eur je None nebo ≤ 0
+      - released_eur ≤ 0
+      - sell_qty ≤ 0
+
+    Čistá funkce — žádné I/O, žádné side effects.
+    """
+    blank = HarvestCandidateDTO(sell_event=sell_event)
+
+    if spot_eur is None or spot_eur <= _ZERO:
+        return blank
+    if sell_event.released_eur <= _ZERO:
+        return blank
+    if sell_event.sell_qty <= _ZERO:
+        return blank
+
+    rebuy_price    = spot_eur    * (1 + spread_buffer_pct / _HUNDRED)
+    effective_cash = sell_event.released_eur * (1 - fee_pct / _HUNDRED)
+    rebuy_qty      = effective_cash / rebuy_price
+    extra_shares   = rebuy_qty - sell_event.sell_qty
+    efficiency_pct = extra_shares / sell_event.sell_qty * _HUNDRED
+    is_alert       = efficiency_pct >= threshold_pct
+
+    return HarvestCandidateDTO(
+        sell_event=sell_event,
+        spot_eur=spot_eur,
+        rebuy_price=rebuy_price,
+        effective_cash=effective_cash,
+        rebuy_qty=rebuy_qty,
+        extra_shares=extra_shares,
+        efficiency_pct=efficiency_pct,
+        is_alert=is_alert,
     )
 
 
@@ -364,6 +448,22 @@ def get_portfolio_snapshot(db_path: str) -> PortfolioSnapshotDTO:
         cash_by_currency=cash,
         net_deposits_by_currency=deposits,
     )
+
+
+# ── Re-entry snapshot ─────────────────────────────────────────────────────────
+
+def get_reentry_snapshot(db_path: str) -> ReEntrySnapshotDTO:
+    """Vrátí SELL události jako unenriched HarvestCandidateDTO list.
+
+    Spot price enrichment (enrich_candidate) provádí UI vrstva po background
+    price loading — stejný vzor jako get_portfolio_snapshot / _load_prices.
+    """
+    from core.services.reentry_engine import compute_sell_events
+
+    rows      = get_ledger_rows(db_path)
+    sell_events = compute_sell_events(rows)
+    candidates  = [HarvestCandidateDTO(sell_event=e) for e in sell_events]
+    return ReEntrySnapshotDTO(candidates=candidates)
 
 
 # ── Delete trade ──────────────────────────────────────────────────────────────
