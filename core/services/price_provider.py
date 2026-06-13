@@ -24,7 +24,6 @@ _HEADERS = {
 
 # ── Alias / suffix mapování ───────────────────────────────────────────────────
 
-# Explicitní aliasy mají přednost před suffix mapováním
 _EXPLICIT_ALIASES: Dict[str, str] = {
     "BRKB.US": "BRK-B",
 }
@@ -43,43 +42,48 @@ _SUFFIX_MAP: Dict[str, str] = {
 }
 
 # ── In-memory TTL cache ───────────────────────────────────────────────────────
-# Klíč: ledger ticker (ne YF symbol) — cache nikdy nevrací cenu pro špatný ticker.
-# Položka: (Decimal price, float unix timestamp)
 _CACHE_TTL: float = 300.0  # 5 minut
 
-_price_cache: Dict[str, Tuple[Decimal, float]] = {}
-_eurusd_cache: List = [None, 0.0]   # [Decimal|None, timestamp]
+# Klíč: ledger ticker  Hodnota: (raw_price, native_currency, unix_timestamp)
+_price_cache: Dict[str, Tuple[Decimal, str, float]] = {}
+
+# FX rate cache: name → [Optional[Decimal], timestamp]
+_FX_NAMES: Tuple[str, ...] = ("EURUSD", "GBPUSD", "CHFUSD")
+_FX_SYMBOLS: Dict[str, str] = {
+    "EURUSD": "EURUSD=X",
+    "GBPUSD": "GBPUSD=X",
+    "CHFUSD": "CHFUSD=X",
+}
+_fx_cache: Dict[str, List] = {name: [None, 0.0] for name in _FX_NAMES}
+
+# Backward-compat alias so tools/price_diag.py and any external reader still work
+_eurusd_cache = _fx_cache["EURUSD"]
 
 
-def _cache_get(ticker: str) -> Optional[Decimal]:
-    """Vrátí cenu z cache pokud existuje a není starší než TTL."""
+def _cache_get(ticker: str) -> Optional[Tuple[Decimal, str]]:
+    """Vrátí (price, currency) z cache pokud existuje a není starší než TTL."""
     entry = _price_cache.get(ticker)
-    if entry and (time.monotonic() - entry[1]) < _CACHE_TTL:
-        return entry[0]
+    if entry and (time.monotonic() - entry[2]) < _CACHE_TTL:
+        return entry[0], entry[1]
     return None
 
 
-def _cache_set(ticker: str, price: Decimal) -> None:
-    _price_cache[ticker] = (price, time.monotonic())
+def _cache_set(ticker: str, price: Decimal, currency: str) -> None:
+    _price_cache[ticker] = (price, currency, time.monotonic())
 
 
 def cache_clear() -> None:
     """Vymaže celou price cache. Určeno pro testy a ruční invalidaci."""
     _price_cache.clear()
-    _eurusd_cache[0] = None
-    _eurusd_cache[1] = 0.0
+    for v in _fx_cache.values():
+        v[0] = None
+        v[1] = 0.0
 
 
 # ── Ticker alias ──────────────────────────────────────────────────────────────
 
 def _yf_ticker(ledger_ticker: str) -> str:
-    """Převede XTB ledger ticker na Yahoo Finance ticker.
-
-    Pořadí:
-      1. explicitní alias (_EXPLICIT_ALIASES)
-      2. suffix mapování (_SUFFIX_MAP): XTB přípona → YF přípona
-      3. původní ticker beze změny jako fallback
-    """
+    """Převede XTB ledger ticker na Yahoo Finance ticker."""
     if ledger_ticker in _EXPLICIT_ALIASES:
         return _EXPLICIT_ALIASES[ledger_ticker]
     for xtb_sfx, yf_sfx in _SUFFIX_MAP.items():
@@ -92,12 +96,7 @@ def _yf_ticker(ledger_ticker: str) -> str:
 # ── HTTP helpers ──────────────────────────────────────────────────────────────
 
 def _make_session():
-    """Requests session se zakázanou SSL verifikací.
-
-    Nutné na strojích kde Windows certificate store neobsahuje root CA
-    používané Yahoo Finance. Bezpečné pro osobní desktop aplikaci —
-    data jsou veřejné tržní ceny.
-    """
+    """Requests session se zakázanou SSL verifikací."""
     try:
         import requests
         import urllib3
@@ -110,99 +109,189 @@ def _make_session():
         return None
 
 
-def _fetch_one(session, yf_sym: str) -> Optional[float]:
-    """Načte regularMarketPrice pro jeden Yahoo Finance symbol přes chart API."""
+def _fetch_one(session, yf_sym: str) -> Tuple[Optional[float], Optional[str]]:
+    """Načte regularMarketPrice + currency pro jeden Yahoo Finance symbol.
+
+    Vrátí (price, currency). Oba prvky mohou být None při selhání.
+    """
     try:
         url = _YF_CHART_URL.format(ticker=yf_sym)
         r = session.get(url, timeout=10)
         if r.status_code != 200:
             logger.debug("Cena %s: HTTP %s", yf_sym, r.status_code)
-            return None
+            return None, None
         meta = r.json().get("chart", {}).get("result", [{}])[0].get("meta", {})
         price = meta.get("regularMarketPrice") or meta.get("previousClose")
+        currency = meta.get("currency")
         if price and float(price) > 0:
-            return float(price)
+            return float(price), currency
     except Exception as exc:
         logger.debug("Fetch ceny %s selhal: %s", yf_sym, exc)
-    return None
+    return None, None
 
 
-def _fetch_ticker(session, ledger_ticker: str) -> Tuple[str, Optional[Decimal]]:
-    """Načte cenu jednoho ledger tickeru. Vrátí (ticker, price|None).
+def _fetch_ticker(
+    session, ledger_ticker: str
+) -> Tuple[str, Optional[Decimal], Optional[str]]:
+    """Načte cenu + nativní měnu jednoho ledger tickeru.
 
+    Vrátí (ticker, price|None, currency|None).
     Bezpečné pro ThreadPoolExecutor — výjimky zachytí a vrátí None.
-    Zachovává fallback na původní ticker pokud YF alias selhal.
     """
     yf_sym = _yf_ticker(ledger_ticker)
     try:
-        price = _fetch_one(session, yf_sym)
+        price, ccy = _fetch_one(session, yf_sym)
         if price is None and yf_sym != ledger_ticker:
             logger.debug("Alias %s → %s selhal, zkouším původní", ledger_ticker, yf_sym)
-            price = _fetch_one(session, ledger_ticker)
+            price, ccy = _fetch_one(session, ledger_ticker)
         if price is not None:
             d = Decimal(str(round(price, 4)))
-            logger.debug("Cena %s (yf: %s): %s", ledger_ticker, yf_sym, d)
-            return ledger_ticker, d
+            ccy = ccy or "USD"   # fallback: assume USD when Yahoo omits currency field
+            logger.debug("Cena %s (yf: %s): %s %s", ledger_ticker, yf_sym, d, ccy)
+            return ledger_ticker, d, ccy
     except Exception as exc:
         logger.debug("_fetch_ticker %s selhal: %s", ledger_ticker, exc)
-    return ledger_ticker, None
+    return ledger_ticker, None, None
+
+
+# ── EUR conversion (pure) ─────────────────────────────────────────────────────
+
+def to_eur(
+    raw_price: Optional[Decimal],
+    raw_ccy:   Optional[str],
+    fx_rates:  Dict[str, Optional[Decimal]],
+) -> Optional[Decimal]:
+    """Převede Yahoo Finance cenu v nativní měně na EUR.
+
+    Podporované měny:
+      USD              → raw / EURUSD
+      EUR              → raw (bez konverze)
+      GBp / GBX (pence) → raw / 100 * GBPUSD / EURUSD
+      GBP              → raw * GBPUSD / EURUSD
+      CHF              → raw * CHFUSD / EURUSD
+
+    Vrátí None pokud:
+      - raw_price je None nebo ≤ 0
+      - potřebný FX kurz není dostupný
+      - měna není podporovaná (exotická nebo None)
+
+    Čistá funkce — žádné I/O, žádné side effects.
+    """
+    if raw_price is None or raw_price <= Decimal("0"):
+        return None
+
+    eurusd = fx_rates.get("EURUSD")
+    gbpusd = fx_rates.get("GBPUSD")
+    chfusd = fx_rates.get("CHFUSD")
+
+    if raw_ccy == "USD":
+        return (raw_price / eurusd) if eurusd else None
+
+    if raw_ccy == "EUR":
+        return raw_price
+
+    if raw_ccy in ("GBp", "GBX"):       # London pence
+        if gbpusd and eurusd:
+            return raw_price / Decimal("100") * gbpusd / eurusd
+        return None
+
+    if raw_ccy == "GBP":
+        if gbpusd and eurusd:
+            return raw_price * gbpusd / eurusd
+        return None
+
+    if raw_ccy == "CHF":
+        if chfusd and eurusd:
+            return raw_price * chfusd / eurusd
+        return None
+
+    logger.debug("to_eur: nepodporovaná měna %r — vracím None", raw_ccy)
+    return None
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def fetch_eurusd() -> Optional[Decimal]:
-    """Načte aktuální EUR/USD kurz z Yahoo Finance (ticker EURUSD=X).
+def fetch_fx_rates() -> Dict[str, Optional[Decimal]]:
+    """Načte EURUSD, GBPUSD, CHFUSD z Yahoo Finance.
 
-    Výsledek se cachuje na _CACHE_TTL sekund (5 min).
-    Vrátí None pokud fetch selže — caller zobrazí '—' pro EUR-dependent pole.
+    Každý kurz se cachuje na _CACHE_TTL sekund. Fetch probíhá jen pro expirované.
+    Vrátí dict; hodnota je None pokud se kurz nepodařilo načíst.
     """
     now = time.monotonic()
-    if _eurusd_cache[0] is not None and (now - _eurusd_cache[1]) < _CACHE_TTL:
-        logger.debug("eurusd cache hit: %s", _eurusd_cache[0])
-        return _eurusd_cache[0]
+    to_fetch: List[str] = []
+
+    result: Dict[str, Optional[Decimal]] = {}
+    for name in _FX_NAMES:
+        entry = _fx_cache[name]
+        if entry[0] is not None and (now - entry[1]) < _CACHE_TTL:
+            result[name] = entry[0]
+            logger.debug("fx cache hit %s: %s", name, entry[0])
+        else:
+            to_fetch.append(name)
+
+    if not to_fetch:
+        return result
 
     session = _make_session()
     if session is None:
-        return None
-    rate = _fetch_one(session, "EURUSD=X")
-    if rate is not None and rate > 0:
-        result = Decimal(str(round(rate, 6)))
-        _eurusd_cache[0] = result
-        _eurusd_cache[1] = now
+        for name in to_fetch:
+            result[name] = None
         return result
-    return None
+
+    for name in to_fetch:
+        yf_sym = _FX_SYMBOLS[name]
+        price, _ = _fetch_one(session, yf_sym)
+        if price is not None and price > 0:
+            rate = Decimal(str(round(price, 6)))
+            _fx_cache[name][0] = rate
+            _fx_cache[name][1] = now
+            result[name] = rate
+        else:
+            result[name] = None
+
+    return result
 
 
-def fetch_prices(tickers: List[str]) -> Dict[str, Decimal]:
-    """Načte aktuální ceny z Yahoo Finance chart API.
+def fetch_eurusd() -> Optional[Decimal]:
+    """Načte aktuální EUR/USD kurz (backward-compat wrapper nad fetch_fx_rates).
 
-    Optimalizace:
-      - TTL cache: ceny starší méně než 5 min se netahají znovu.
-      - Paralelní fetch: tickery bez cache se stahují souběžně (max 6 workerů).
-      - Izolace chyb: selhání jednoho tickeru nesmí shodit ostatní.
+    Výsledek se cachuje na _CACHE_TTL sekund (5 min).
+    Vrátí None pokud fetch selže.
+    """
+    return fetch_fx_rates().get("EURUSD")
 
+
+def fetch_prices_with_currency(
+    tickers: List[str],
+) -> Dict[str, Tuple[Decimal, str]]:
+    """Načte aktuální ceny včetně nativní měny z Yahoo Finance chart API.
+
+    Vrátí {ledger_ticker: (raw_price, native_currency)}.
     Klíče výsledku jsou vždy původní ledger tickery (ne Yahoo Finance symboly).
     Vrátí prázdný dict pokud requests není dostupné nebo fetch selže.
+
+    Optimalizace:
+      - TTL cache (5 min): již stažené ceny se netahají znovu.
+      - Paralelní fetch: max 6 workerů.
+      - Izolace chyb: selhání jednoho tickeru nesmí shodit ostatní.
     """
     if not tickers:
         return {}
 
-    # ── 1. Rozděl na cache-hit a to-fetch ────────────────────────────────────
-    result: Dict[str, Decimal] = {}
+    result: Dict[str, Tuple[Decimal, str]] = {}
     to_fetch: List[str] = []
 
     for ticker in tickers:
         cached = _cache_get(ticker)
         if cached is not None:
             result[ticker] = cached
-            logger.debug("Cena %s: cache hit (%s)", ticker, cached)
+            logger.debug("Cena %s: cache hit (%s %s)", ticker, cached[0], cached[1])
         else:
             to_fetch.append(ticker)
 
     if not to_fetch:
         return result
 
-    # ── 2. Paralelní HTTP fetch pro zbývající tickery ─────────────────────────
     session = _make_session()
     if session is None:
         logger.debug("requests není nainstalováno — ceny nedostupné")
@@ -216,12 +305,20 @@ def fetch_prices(tickers: List[str]) -> Dict[str, Decimal]:
         }
         for future in as_completed(futures, timeout=30):
             try:
-                ticker, price = future.result()
-                if price is not None:
-                    result[ticker] = price
-                    _cache_set(ticker, price)
+                ticker, price, ccy = future.result()
+                if price is not None and ccy is not None:
+                    result[ticker] = (price, ccy)
+                    _cache_set(ticker, price, ccy)
             except Exception as exc:
                 failed_ticker = futures[future]
                 logger.debug("Future pro %s selhala: %s", failed_ticker, exc)
 
     return result
+
+
+def fetch_prices(tickers: List[str]) -> Dict[str, Decimal]:
+    """Backward-compat wrapper — vrátí jen ceny bez nativní měny.
+
+    Nové volající by měly používat fetch_prices_with_currency() + to_eur().
+    """
+    return {t: v[0] for t, v in fetch_prices_with_currency(tickers).items()}

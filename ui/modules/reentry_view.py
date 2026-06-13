@@ -1,11 +1,10 @@
-"""Re-entry Watch View — M-RE4a.
+"""Re-entry Watch View — M-RE4a/4b.
 
 Zobrazuje ledger-derived SELL události jako harvest candidate karty,
 obohacené o aktuální spot ceny a simulaci rebuye načtenou na pozadí.
 
-Cenové obohacení používá stejnou USD→EUR konverzi jako portfolio_view.
-Instrumenty kotované v EUR, CHF nebo GBp (ABBN.CH, NVD.DE, ISLN.UK...)
-zobrazí nesprávné spot EUR — bude opraveno po price_provider refaktoru.
+Cenové obohacení používá currency-aware konverzi (BUG-014 fix):
+USD→EUR přes EURUSD, EUR přímo, CHF přes CHFUSD/EURUSD, GBp/GBP přes GBPUSD/EURUSD.
 """
 from __future__ import annotations
 
@@ -37,11 +36,6 @@ GREEN    = "#22c55e"
 RED      = "#ef4444"
 
 _ZERO = Decimal("0")
-
-_PROVIDER_WARNING = (
-    "Price enrichment uses the current price provider; "
-    "non-USD instruments may require later currency-aware fix."
-)
 
 
 # ── Formátovací helpers (module-level — testable) ─────────────────────────────
@@ -244,18 +238,17 @@ def build_reentry_view(page: ft.Page, db_path: str) -> tuple:
             return
 
         try:
-            from core.services.price_provider import fetch_eurusd, fetch_prices
-            prices_usd = fetch_prices(tickers)
-            eurusd     = fetch_eurusd()
+            from core.services.price_provider import fetch_fx_rates, fetch_prices_with_currency, to_eur
+            prices_raw = fetch_prices_with_currency(tickers)
+            fx_rates   = fetch_fx_rates()
         except Exception as exc:
             logger.warning("Re-entry price fetch failed: %s", exc)
             return
 
         enriched: List[HarvestCandidateDTO] = []
         for c in snap.candidates:
-            spot_usd = prices_usd.get(c.sell_event.ticker)
-            # Same USD→EUR conversion as portfolio_view — known limitation for non-USD
-            spot_eur = (spot_usd / eurusd) if (spot_usd and eurusd) else None
+            raw      = prices_raw.get(c.sell_event.ticker)
+            spot_eur = to_eur(raw[0], raw[1], fx_rates) if raw else None
             enriched.append(enrich_candidate(c.sell_event, spot_eur))
 
         n_alert = sum(1 for c in enriched if c.is_alert)
@@ -320,13 +313,6 @@ def build_reentry_view(page: ft.Page, db_path: str) -> tuple:
                             ],
                             vertical_alignment=ft.CrossAxisAlignment.CENTER,
                             spacing=8,
-                        ),
-                        ft.Container(
-                            content=ft.Text(
-                                f"⚠ {_PROVIDER_WARNING}",
-                                size=11, color=T_MUT, italic=True,
-                            ),
-                            padding=ft.Padding(left=2, top=4, right=0, bottom=0),
                         ),
                         ft.Divider(height=1, color=BORDER),
                         ft.Container(height=12),

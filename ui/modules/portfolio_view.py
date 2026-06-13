@@ -341,17 +341,17 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
         tickers = [p.ticker for p in snap.positions]
 
         try:
-            from core.services.price_provider import fetch_eurusd, fetch_prices
+            from core.services.price_provider import fetch_fx_rates, fetch_prices_with_currency, to_eur
             from core.services.ui_facade import enrich_with_pnl
             t_p = time.perf_counter()
-            prices_usd = fetch_prices(tickers)
+            prices_raw = fetch_prices_with_currency(tickers)
             logger.debug("prices fetch: %.1f ms (%d tickerů)", (time.perf_counter() - t_p) * 1000, len(tickers))
             t_fx = time.perf_counter()
-            eurusd = fetch_eurusd()
-            logger.debug("eurusd fetch: %.1f ms", (time.perf_counter() - t_fx) * 1000)
+            fx_rates = fetch_fx_rates()
+            logger.debug("fx rates fetch: %.1f ms", (time.perf_counter() - t_fx) * 1000)
         except Exception:
-            prices_usd = {}
-            eurusd = None
+            prices_raw = {}
+            fx_rates = {}
 
         current_names: Dict[str, str] = dict(_names[0])  # already loaded in refresh()
         unknown = [t for t in tickers if t not in current_names]
@@ -361,15 +361,15 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
                 current_names.update(new_names)
                 save_names(db_path, current_names)
 
-        if not prices_usd and not unknown:
+        if not prices_raw and not unknown:
             return
 
         enriched: List[PositionDTO] = []
         portfolio_value = Decimal("0")
 
         for pos in snap.positions:
-            spot_usd = prices_usd.get(pos.ticker)
-            spot_eur = (spot_usd / eurusd) if (spot_usd and eurusd) else None
+            raw = prices_raw.get(pos.ticker)
+            spot_eur = to_eur(raw[0], raw[1], fx_rates) if raw else None
             pos_val  = (pos.quantity * spot_eur) if spot_eur is not None else None
 
             if pos_val is not None:
