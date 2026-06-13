@@ -102,12 +102,16 @@ def _build_main_app(page: ft.Page, ctx: AppContextDTO) -> None:
     _run_portfolio = None
     _run_ledger    = None
     _ledger_view   = None
+    _reentry_view  = None   # lazy — built on first tab click
+    _run_reentry   = None
 
     def _refresh_all() -> None:
         if _run_portfolio:
             _run_portfolio()
         if _content.content is _ledger_view and _run_ledger:
             _run_ledger()
+        if _reentry_view is not None and _content.content is _reentry_view and _run_reentry:
+            _run_reentry()
 
     # ── Build views ───────────────────────────────────────────────────────────
     _portfolio_view, _run_portfolio = build_portfolio_view(page, db_path)
@@ -115,10 +119,17 @@ def _build_main_app(page: ft.Page, ctx: AppContextDTO) -> None:
         page, db_path, on_after_change=_refresh_all,
     )
 
+    def _ensure_reentry_view() -> None:
+        nonlocal _reentry_view, _run_reentry
+        if _reentry_view is None:
+            from ui.modules.reentry_view import build_reentry_view
+            _reentry_view, _run_reentry = build_reentry_view(page, db_path)
+
     # ── Nav ───────────────────────────────────────────────────────────────────
     _NAV_ITEMS = [
         (ft.Icons.SHOW_CHART_OUTLINED,  ft.Icons.SHOW_CHART,  "Portfolio"),
         (ft.Icons.LIST_ALT_OUTLINED,    ft.Icons.LIST_ALT,    "Ledger"),
+        (ft.Icons.AUTORENEW,            ft.Icons.AUTORENEW,   "Re-entry"),
     ]
     _nav_idx = [0]
     _nav_col = ft.Column(spacing=2, tight=True)
@@ -129,9 +140,13 @@ def _build_main_app(page: ft.Page, ctx: AppContextDTO) -> None:
         if idx == 0:
             _content.content = _portfolio_view
             _run_portfolio()
-        else:
+        elif idx == 1:
             _content.content = _ledger_view
             _run_ledger()
+        elif idx == 2:
+            _ensure_reentry_view()
+            _content.content = _reentry_view
+            _run_reentry()
         page.update()
 
     def _build_nav_btn(idx: int) -> ft.Container:
