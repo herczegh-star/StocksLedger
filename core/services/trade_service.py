@@ -25,18 +25,24 @@ def generate_canonical_id(
     type_str: str,
     conn,
 ) -> str:
-    """Canonical ID: yyyymmdd_hhmmss_VENUE_TYPE_SEQ."""
+    """Canonical ID: yyyymmdd_hhmmss_VENUE_TYPE_SEQ.
+
+    SEQ = nejvyšší existující číselný suffix pro daný prefix + 1 (ne COUNT),
+    aby po DELETE nevzniklo ID, které už patří jiné existující transakci.
+    Prefix se porovnává přes SUBSTR — v LIKE by '_' fungovalo jako wildcard.
+    """
     ts_part = timestamp.strftime("%Y%m%d_%H%M%S")
     venue_upper = venue.upper()
     type_upper = type_str.upper()
+    prefix = f"{ts_part}_{venue_upper}_{type_upper}_"
 
-    row = conn.execute(
-        "SELECT COUNT(DISTINCT id) FROM ledger "
-        "WHERE timestamp = ? AND venue = ? AND type = ?",
-        (timestamp.isoformat(), venue.lower(), type_upper),
-    ).fetchone()
-    seq = (row[0] if row else 0) + 1
-    return f"{ts_part}_{venue_upper}_{type_upper}_{seq:03d}"
+    rows = conn.execute(
+        "SELECT DISTINCT id FROM ledger WHERE SUBSTR(id, 1, ?) = ?",
+        (len(prefix), prefix),
+    ).fetchall()
+    suffixes = [row[0][len(prefix):] for row in rows]
+    seq = max((int(s) for s in suffixes if s.isdigit()), default=0) + 1
+    return f"{prefix}{seq:03d}"
 
 
 @dataclass
