@@ -39,7 +39,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.config import get_resolved_config_path, load_config
 from core.ledger_store import LedgerStore
-from core.services.holdings_engine import FIAT, _REV_PREFIX
+from core.services.holdings_engine import FIAT, reversed_trade_ids
 
 # Import symbol-mapping helpers from production code (read-only, no side effects)
 from core.services.price_provider import (
@@ -74,10 +74,7 @@ def _get_tickers_from_ledger(db_path: str) -> List[str]:
     finally:
         store.close()
 
-    reversed_ids: set = set()
-    for r in rows:
-        if r.type == "REVERSAL" and r.note and r.note.startswith(_REV_PREFIX):
-            reversed_ids.add(r.note[len(_REV_PREFIX):])
+    reversed_ids = reversed_trade_ids(rows)
 
     seen: set = set()
     tickers: List[str] = []

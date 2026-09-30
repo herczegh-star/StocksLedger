@@ -14,7 +14,7 @@ from decimal import Decimal
 from typing import Dict, List, Optional
 
 from core.model import RawRow
-from core.services.holdings_engine import FIAT, _REV_PREFIX
+from core.services.holdings_engine import FIAT, reversed_trade_ids
 
 _ZERO    = Decimal("0")
 _EPSILON = Decimal("1E-8")
@@ -49,10 +49,7 @@ def compute_sell_events(rows: List[RawRow]) -> List[SellEventRaw]:
     Returns results sorted by sell_date ascending.
     """
     # Step 1: reversed trade IDs
-    reversed_ids: set = set()
-    for r in rows:
-        if r.type == "REVERSAL" and r.note and r.note.startswith(_REV_PREFIX):
-            reversed_ids.add(r.note[len(_REV_PREFIX):])
+    reversed_ids = reversed_trade_ids(rows)
 
     # Step 2: group SELL rows by trade_id
     sell_groups: Dict[str, List[RawRow]] = {}

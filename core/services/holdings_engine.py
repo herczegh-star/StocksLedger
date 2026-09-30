@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Dict, List
+from typing import Dict, List, Set
 
 from core.model import RawRow
 
@@ -29,6 +29,21 @@ class HoldingRaw:
     currency: str         # quote měna (EUR, USD, ...)
 
 
+def reversed_trade_ids(rows: List[RawRow]) -> Set[str]:
+    """Vrátí trade_id všech stornovaných skupin. Čistá funkce.
+
+    REVERSAL note má formát 'REVERSAL of <trade_id>', případně
+    'REVERSAL of <trade_id>; <původní poznámka>' — ID končí prvním středníkem.
+    """
+    ids: Set[str] = set()
+    for r in rows:
+        if r.type == "REVERSAL" and r.note and r.note.startswith(_REV_PREFIX):
+            trade_id = r.note[len(_REV_PREFIX):].split(";", 1)[0].strip()
+            if trade_id:
+                ids.add(trade_id)
+    return ids
+
+
 def compute_holdings(rows: List[RawRow]) -> List[HoldingRaw]:
     """Vypočte aktuální pozice z ledger rows.
 
@@ -39,10 +54,7 @@ def compute_holdings(rows: List[RawRow]) -> List[HoldingRaw]:
     - Vrátí seřazený list dle ticker, pouze qty > epsilon.
     """
     # Krok 1: najdi stornovaná trade_id z REVERSAL notes
-    reversed_ids: set = set()
-    for r in rows:
-        if r.type == "REVERSAL" and r.note and r.note.startswith(_REV_PREFIX):
-            reversed_ids.add(r.note[len(_REV_PREFIX):])
+    reversed_ids = reversed_trade_ids(rows)
 
     # Krok 2: chronologický průchod (rows jsou seřazeny ASC z DB)
     # state[ticker] = {"qty": Decimal, "wac": Decimal, "currency": str}
@@ -103,10 +115,7 @@ def compute_holdings(rows: List[RawRow]) -> List[HoldingRaw]:
 def compute_net_deposits(rows: List[RawRow]) -> Dict[str, Decimal]:
     """Vrátí čisté vklady (CASH_IN - CASH_OUT) per měna. Nezahrnuje BUY/SELL legs."""
     _CASH_TYPES = frozenset({"CASH_IN", "CASH_OUT"})
-    reversed_ids: set = set()
-    for r in rows:
-        if r.type == "REVERSAL" and r.note and r.note.startswith(_REV_PREFIX):
-            reversed_ids.add(r.note[len(_REV_PREFIX):])
+    reversed_ids = reversed_trade_ids(rows)
     balances: Dict[str, Decimal] = {}
     for r in rows:
         if r.type not in _CASH_TYPES:
@@ -124,10 +133,7 @@ def compute_cash_balance(rows: List[RawRow]) -> Dict[str, Decimal]:
       CASH_IN / CASH_OUT, EUR nožičky BUY/SELL, DIVIDEND, FEE, TAX.
     Vrátí pouze kladné zůstatky (záporné = přečerpání, neočekáváno).
     """
-    reversed_ids: set = set()
-    for r in rows:
-        if r.type == "REVERSAL" and r.note and r.note.startswith(_REV_PREFIX):
-            reversed_ids.add(r.note[len(_REV_PREFIX):])
+    reversed_ids = reversed_trade_ids(rows)
 
     balances: Dict[str, Decimal] = {}
     for r in rows:
