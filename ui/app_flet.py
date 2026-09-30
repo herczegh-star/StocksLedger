@@ -86,6 +86,7 @@ def _build_error_view(page: ft.Page, ctx: AppContextDTO) -> ft.Control:
 
 def _build_main_app(page: ft.Page, ctx: AppContextDTO) -> None:
     from ui.modules.add_trade_dialog import open_add_trade_dialog
+    from ui.modules.export_dialog import open_export_dialog
     from ui.modules.ledger_view import build_ledger_view
     from ui.modules.portfolio_view import build_portfolio_view
 
@@ -192,6 +193,9 @@ def _build_main_app(page: ft.Page, ctx: AppContextDTO) -> None:
     def _on_add_trade(e) -> None:
         open_add_trade_dialog(page, db_path, _refresh_all)
 
+    def _on_export(e) -> None:
+        open_export_dialog(page, db_path)
+
     def _on_refresh(e) -> None:
         if _content.content is _portfolio_view:
             _run_portfolio()
@@ -224,6 +228,12 @@ def _build_main_app(page: ft.Page, ctx: AppContextDTO) -> None:
                                 color=ft.Colors.WHITE,
                                 bgcolor=ft.Colors.GREEN_700,
                             ),
+                        ),
+                        ft.TextButton(
+                            "Export",
+                            icon=ft.Icons.DOWNLOAD,
+                            on_click=_on_export,
+                            style=ft.ButtonStyle(color=T_MUT),
                         ),
                         ft.TextButton(
                             "Refresh",

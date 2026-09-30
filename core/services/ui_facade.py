@@ -8,6 +8,7 @@ Public API:
     get_ledger_rows(db_path)          -> list[RawRow]
     delete_trade(db_path, trade_id)   -> SimpleResultDTO
     get_portfolio_snapshot(db_path)   -> PortfolioSnapshotDTO
+    export_ledger_tax(db_path, date_to, export_dir) -> ExportResultDTO
 
 Typy transakcí:
     BUY / SELL   → double-entry přes trade_service (asset leg + currency leg)
@@ -22,7 +23,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Dict, List, Optional
 
@@ -92,6 +93,14 @@ class AddTradeRequestDTO:
 class AddTradeResultDTO:
     success: bool
     n_rows_added: int
+    error_message: Optional[str] = None
+
+
+@dataclass
+class ExportResultDTO:
+    success: bool
+    path: Optional[str] = None
+    n_rows: int = 0
     error_message: Optional[str] = None
 
 
@@ -484,3 +493,32 @@ def delete_trade(db_path: str, trade_id: str) -> SimpleResultDTO:
         return SimpleResultDTO(success=False, error_message=msg)
     finally:
         store.close()
+
+
+# ── LEDGER_TAX export ─────────────────────────────────────────────────────────
+
+def export_ledger_tax(
+    db_path: str,
+    date_to: date,
+    export_dir: Optional[str] = None,
+) -> ExportResultDTO:
+    """Exportuje RAW ledger řádky do konce dne date_to (včetně) do CSV pro LEDGER_TAX.
+
+    export_dir=None → použije export_dir z stocks_ledger.ini.
+    Nikdy nevyvolá výjimku — chyby jdou do ExportResultDTO.error_message.
+    """
+    from core.services.ledger_tax_export import export_ledger_tax as _export
+
+    try:
+        if not os.path.exists(db_path):
+            return ExportResultDTO(success=False, error_message=f"Databáze '{db_path}' neexistuje.")
+        if export_dir is None:
+            from core.config import load_config
+            export_dir = load_config().get("export_dir", "").strip() or "exports"
+        path, n_rows = _export(db_path, date_to, export_dir)
+        logger.info("LEDGER_TAX export: %d řádků → %s", n_rows, path)
+        return ExportResultDTO(success=True, path=path, n_rows=n_rows)
+    except Exception as exc:
+        msg = f"Export LEDGER_TAX selhal: {exc}"
+        logger.error(msg)
+        return ExportResultDTO(success=False, error_message=msg)

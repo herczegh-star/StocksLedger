@@ -148,6 +148,22 @@ class LedgerStore:
         rows = self.conn.execute(query, params).fetchall()
         return [self._row_to_rawrow(r) for r in rows]
 
+    def export_rows(self, before: Optional[datetime] = None) -> List[dict]:
+        """RAW řádky přesně jak jsou v DB (včetně pk, row_fp, imported_at), bez konverze typů.
+
+        before: exkluzivní horní hranice — vrátí jen řádky s timestamp < before.
+        """
+        query = (
+            "SELECT pk, id, timestamp, type, asset, amount, currency, price, venue, note,"
+            " row_fp, imported_at FROM ledger"
+        )
+        params: list = []
+        if before is not None:
+            query += " WHERE timestamp < ?"
+            params.append(before.isoformat())
+        query += " ORDER BY timestamp ASC, pk ASC"
+        return [dict(r) for r in self.conn.execute(query, params).fetchall()]
+
     def get_rows_by_id(self, row_id: str) -> List[RawRow]:
         rows = self.conn.execute(
             "SELECT * FROM ledger WHERE id = ? ORDER BY timestamp ASC, id ASC, row_fp ASC",
