@@ -250,3 +250,64 @@ class TestExportDialog:
         labels = [c.label for row in col.controls if hasattr(row, "controls")
                   for c in row.controls if hasattr(c, "label")]
         assert labels == ["Typ exportu", "Date to"]
+
+
+# ── Výchozí adresář exportů: <StocksLedger root>/exports ─────────────────────
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+class TestDefaultExportDir:
+    def test_root_je_adresar_s_main_py(self):
+        from core.config import APP_ROOT
+        assert os.path.samefile(APP_ROOT, _REPO_ROOT)
+        assert (APP_ROOT / "main.py").is_file()
+
+    def test_vychozi_export_dir_je_root_exports(self):
+        from core.services.ui_facade import get_export_dir
+        assert os.path.isabs(get_export_dir())
+        assert os.path.normcase(get_export_dir()) == os.path.normcase(os.path.join(_REPO_ROOT, "exports"))
+
+    def test_nezavisi_na_cwd(self, tmp_path, monkeypatch):
+        from core.services.ui_facade import get_export_dir
+        before = get_export_dir()
+        monkeypatch.chdir(tmp_path)
+        assert get_export_dir() == before
+
+    def test_facade_bez_export_dir_zapise_do_root_exports(self, tmp_db, tmp_path, monkeypatch):
+        import re
+        import core.config as cfg
+        fake_root = tmp_path / "StocksLedger"
+        fake_root.mkdir()
+        monkeypatch.setattr(cfg, "APP_ROOT", fake_root)   # nepsat do skutečného repa
+        monkeypatch.chdir(tmp_path)                        # cwd jinde než root
+        _buy(tmp_db, datetime(2026, 1, 5, 10, 0, 0))
+        exports = fake_root / "exports"
+        assert not exports.exists()
+
+        r = facade_export(tmp_db, _DATE_TO)
+
+        assert r.success and r.n_rows == 2
+        assert exports.is_dir()                                         # složka vytvořena
+        assert os.path.dirname(r.path) == str(exports)                  # soubor uvnitř ní
+        assert os.path.isabs(r.path) and os.path.isfile(r.path)
+        assert re.fullmatch(r"stocks_ledger_tax_2026-12-31_\d{8}_\d{6}\.csv", os.path.basename(r.path))
+
+    def test_dialog_ukaze_cil_a_absolutni_cestu(self, tmp_db, tmp_path, monkeypatch):
+        import core.config as cfg
+        monkeypatch.setattr(cfg, "APP_ROOT", tmp_path / "root")
+        _buy(tmp_db, datetime(2026, 1, 5, 10, 0, 0))
+        page = MagicMock()
+        page.overlay = []
+        open_export_dialog(page, tmp_db)
+        col = page.overlay[-1].content.content
+        info, status = col.controls[3], col.controls[4]
+        expected_dir = str(tmp_path / "root" / "exports")
+        assert expected_dir in info.value
+
+        col.controls[2].controls[1].value = "2026-12-31"
+        col.controls[5].controls[1].on_click(None)
+
+        files = list((tmp_path / "root" / "exports").glob("stocks_ledger_tax_2026-12-31_*.csv"))
+        assert len(files) == 1
+        assert status.value == f"Exportováno 2 řádků →\n{files[0]}"

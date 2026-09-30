@@ -25,3 +25,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Exports (CSV s finančními daty — nikdy necommitovat)
+exports/

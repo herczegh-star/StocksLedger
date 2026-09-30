@@ -3,6 +3,7 @@
 Typy:
     LEDGER_TAX — RAW ledger řádky do CSV pro aplikaci LEDGER_TAX.
                  Jediný parametr: Date to (od nejstaršího záznamu do konce dne včetně).
+                 Soubor se ukládá do <StocksLedger root>/exports.
 """
 from __future__ import annotations
 
@@ -12,7 +13,7 @@ from typing import Optional
 
 import flet as ft
 
-from core.services.ui_facade import export_ledger_tax
+from core.services.ui_facade import export_ledger_tax, get_export_dir
 from ui.modules.add_trade_dialog import _card, _close_modal, _set_st, _show_modal, _status
 
 EXPORT_TYPES = ["LEDGER_TAX"]
@@ -43,8 +44,9 @@ def open_export_dialog(page: ft.Page, db_path: str) -> None:
     )
     date_to_tf = ft.TextField(label="Date to", hint_text="2025-12-31", width=200)
     info = ft.Text(
-        "Všechny ledger řádky od nejstaršího záznamu do konce zvoleného dne (včetně).",
-        size=12, color=ft.Colors.GREY_400,
+        "Všechny ledger řádky od nejstaršího záznamu do konce zvoleného dne (včetně).\n"
+        f"Soubor se uloží do: {get_export_dir()}",
+        size=12, color=ft.Colors.GREY_400, selectable=True,
     )
     st = _status()
     st.selectable = True
@@ -58,7 +60,7 @@ def open_export_dialog(page: ft.Page, db_path: str) -> None:
         if err: _set_st(st, err, True, page); return
         r = export_ledger_tax(db_path, d)
         if r.success:
-            _set_st(st, f"Exportováno {r.n_rows} řádků → {r.path}", False, page)
+            _set_st(st, f"Exportováno {r.n_rows} řádků →\n{r.path}", False, page)
         else:
             _set_st(st, r.error_message or "Chyba exportu", True, page)
 

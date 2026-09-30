@@ -9,6 +9,7 @@ Public API:
     delete_trade(db_path, trade_id)   -> SimpleResultDTO
     get_portfolio_snapshot(db_path)   -> PortfolioSnapshotDTO
     export_ledger_tax(db_path, date_to, export_dir) -> ExportResultDTO
+    get_export_dir()                  -> str  (<StocksLedger root>/exports)
 
 Typy transakcí:
     BUY / SELL   → double-entry přes trade_service (asset leg + currency leg)
@@ -497,6 +498,12 @@ def delete_trade(db_path: str, trade_id: str) -> SimpleResultDTO:
 
 # ── LEDGER_TAX export ─────────────────────────────────────────────────────────
 
+def get_export_dir() -> str:
+    """Absolutní cesta výchozího adresáře exportů: <StocksLedger root>/exports."""
+    from core.config import get_app_export_dir
+    return str(get_app_export_dir())
+
+
 def export_ledger_tax(
     db_path: str,
     date_to: date,
@@ -504,7 +511,7 @@ def export_ledger_tax(
 ) -> ExportResultDTO:
     """Exportuje RAW ledger řádky do konce dne date_to (včetně) do CSV pro LEDGER_TAX.
 
-    export_dir=None → použije export_dir z stocks_ledger.ini.
+    export_dir=None → <StocksLedger root>/exports (vytvoří se, pokud neexistuje).
     Nikdy nevyvolá výjimku — chyby jdou do ExportResultDTO.error_message.
     """
     from core.services.ledger_tax_export import export_ledger_tax as _export
@@ -513,8 +520,7 @@ def export_ledger_tax(
         if not os.path.exists(db_path):
             return ExportResultDTO(success=False, error_message=f"Databáze '{db_path}' neexistuje.")
         if export_dir is None:
-            from core.config import load_config
-            export_dir = load_config().get("export_dir", "").strip() or "exports"
+            export_dir = get_export_dir()
         path, n_rows = _export(db_path, date_to, export_dir)
         logger.info("LEDGER_TAX export: %d řádků → %s", n_rows, path)
         return ExportResultDTO(success=True, path=path, n_rows=n_rows)

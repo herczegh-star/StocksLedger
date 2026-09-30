@@ -20,6 +20,15 @@ DEFAULT_CONFIG = {
 
 _LEDGER_KEYS = {"db_path", "default_venue", "export_dir"}
 
+# Kořen aplikace StocksLedger (adresář s main.py) — odvozený z umístění tohoto
+# souboru (core/config.py), takže nezávisí na current working directory.
+APP_ROOT = Path(__file__).resolve().parent.parent
+
+
+def get_app_export_dir() -> Path:
+    """Výchozí adresář UI exportů: <StocksLedger root>/exports."""
+    return APP_ROOT / "exports"
+
 
 def get_default_config_path() -> Path:
     home_cfg = Path.home() / ".stocks_ledger" / "stocks_ledger.ini"
