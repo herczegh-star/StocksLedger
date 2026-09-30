@@ -67,8 +67,11 @@ def build_reversal_rows(
 def reverse_trade(db_path: str, trade_id: str) -> List[RawRow]:
     """Načte všechny řádky trade_id, postaví a uloží reversal řádky.
 
+    Reversal řádky se zapisují atomicky (všechny, nebo žádný).
+
     Raises:
         ValueError: Pokud trade_id neexistuje nebo byl již jednou stornován.
+        DuplicateRowError: některý reversal řádek už existuje; nic nebylo zapsáno.
     """
     store = LedgerStore(db_path)
     try:
@@ -88,7 +91,7 @@ def reverse_trade(db_path: str, trade_id: str) -> List[RawRow]:
                 "Každou transakci lze stornovat pouze jednou."
             )
         reversal_rows = build_reversal_rows(original_rows)
-        store.import_rows(reversal_rows)
+        store.insert_group(reversal_rows)
         return reversal_rows
     finally:
         store.close()

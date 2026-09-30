@@ -164,11 +164,16 @@ def add_trade(
     inp: AddTradeInput,
     fiat: FrozenSet[str] = _FIAT_DEFAULT,
 ) -> TradeResult:
+    """Zapíše obchod atomicky (všechny nohy, nebo nic).
+
+    Raises:
+        DuplicateRowError: některá noha už v ledgeru existuje; nic nebylo zapsáno.
+    """
     store = LedgerStore(db_path)
     try:
         trade_id = generate_canonical_id(inp.timestamp, inp.venue, inp.type, store.conn)
         rows = build_trade_rows(inp, fiat, trade_id=trade_id)
-        counts = store.import_rows(rows)
+        inserted = store.insert_group(rows)
     finally:
         store.close()
-    return TradeResult(rows=rows, inserted=counts["inserted"], skipped=counts["skipped"])
+    return TradeResult(rows=rows, inserted=inserted, skipped=0)

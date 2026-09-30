@@ -172,11 +172,11 @@ class TestAddTrade:
         assert result.inserted == 2  # base + currency
 
     def test_dedup_on_reimport(self, tmp_db):
+        from core.ledger_store import DuplicateRowError
         inp = _inp("BUY")
         add_trade(tmp_db, inp)
-        result2 = add_trade(tmp_db, inp)
-        assert result2.inserted == 0
-        assert result2.skipped == 2
+        with pytest.raises(DuplicateRowError):
+            add_trade(tmp_db, inp)
 
     def test_sell_writes_correctly(self, tmp_db):
         result = add_trade(tmp_db, _inp("SELL"))

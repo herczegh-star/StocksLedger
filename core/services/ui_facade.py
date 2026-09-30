@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 from core.constants import TRADE_TYPES
-from core.ledger_store import LedgerStore
+from core.ledger_store import DuplicateRowError, LedgerStore
 from core.model import RawRow
 from core.services.trade_service import (
     AddTradeInput,
@@ -396,11 +396,13 @@ def add_trade(request: AddTradeRequestDTO, db_path: str) -> AddTradeResultDTO:
             venue=venue,
             note=request.note,
         )
-        counts = store.import_rows([row])
+        inserted = store.insert_group([row])
+    except DuplicateRowError as exc:
+        return AddTradeResultDTO(success=False, n_rows_added=0, error_message=str(exc))
     finally:
         store.close()
 
-    return AddTradeResultDTO(success=True, n_rows_added=counts["inserted"])
+    return AddTradeResultDTO(success=True, n_rows_added=inserted)
 
 
 # ── Read ───────────────────────────────────────────────────────────────────────

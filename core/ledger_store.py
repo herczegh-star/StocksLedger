@@ -2,8 +2,32 @@
 import sqlite3
 from datetime import datetime
 from decimal import Decimal
-from typing import List, Optional, Tuple
+from typing import List, Optional
 from core.model import RawRow
+
+_INSERT_SQL = """INSERT INTO ledger
+   (id, timestamp, type, asset, amount, currency, price, venue, note, row_fp, imported_at)
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+
+
+class DuplicateRowError(ValueError):
+    """Skupina řádků nebyla zapsána, protože některý řádek už v ledgeru existuje (row_fp)."""
+
+
+def _insert_params(row: RawRow, imported_at: str) -> tuple:
+    return (
+        row.id or "",
+        row.timestamp.isoformat(),
+        row.type,
+        row.asset.upper(),
+        str(row.amount),
+        row.currency.upper(),
+        str(row.price) if row.price is not None else None,
+        row.venue.lower(),
+        row.note,
+        row.fingerprint(),
+        imported_at,
+    )
 
 
 class LedgerStore:
@@ -39,32 +63,38 @@ class LedgerStore:
         self.conn.commit()
 
     def insert(self, row: RawRow) -> bool:
-        fp = row.fingerprint()
         try:
-            self.conn.execute(
-                """INSERT INTO ledger
-                   (id, timestamp, type, asset, amount, currency, price, venue, note, row_fp, imported_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    row.id or "",
-                    row.timestamp.isoformat(),
-                    row.type,
-                    row.asset.upper(),
-                    str(row.amount),
-                    row.currency.upper(),
-                    str(row.price) if row.price is not None else None,
-                    row.venue.lower(),
-                    row.note,
-                    fp,
-                    datetime.now().isoformat(),
-                ),
-            )
+            self.conn.execute(_INSERT_SQL, _insert_params(row, datetime.now().isoformat()))
             self.conn.commit()
             return True
         except sqlite3.IntegrityError:
             return False
 
+    def insert_group(self, rows: List[RawRow]) -> int:
+        """Zapíše skupinu řádků jedné ekonomické transakce: všechny, nebo žádný.
+
+        Při kolizi row_fp (nebo jiné IntegrityError) provede rollback celé
+        skupiny a vyvolá DuplicateRowError. Vrátí počet zapsaných řádků.
+        """
+        now = datetime.now().isoformat()
+        row = None
+        try:
+            with self.conn:
+                for row in rows:
+                    self.conn.execute(_INSERT_SQL, _insert_params(row, now))
+        except sqlite3.IntegrityError as exc:
+            raise DuplicateRowError(
+                "Duplicitní transakce: řádek "
+                f"{row.type} {row.asset} {row.amount} {row.currency} ({row.timestamp.isoformat()}) "
+                "už v ledgeru existuje. Nic nebylo zapsáno."
+            ) from exc
+        return len(rows)
+
     def import_rows(self, rows: List[RawRow]) -> dict:
+        """Bulk import po řádcích: duplicity (row_fp) přeskočí a započítá do skipped.
+
+        Není atomický — pro jednu ekonomickou transakci použij insert_group().
+        """
         inserted = 0
         skipped = 0
         for row in rows:
@@ -130,41 +160,6 @@ class LedgerStore:
             "SELECT pk FROM ledger WHERE id = ? ORDER BY pk ASC", (row_id,)
         ).fetchall()
         return [r["pk"] for r in rows]
-
-    def insert_pair(self, row_a: RawRow, row_b: RawRow) -> Tuple[bool, bool]:
-        """Vloží dva řádky v jedné atomické transakci (double-entry BUY/SELL)."""
-        fp_a = row_a.fingerprint()
-        fp_b = row_b.fingerprint()
-        now = datetime.now().isoformat()
-        results = [False, False]
-        with self.conn:
-            try:
-                self.conn.execute(
-                    """INSERT INTO ledger
-                       (id, timestamp, type, asset, amount, currency, price, venue, note, row_fp, imported_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (row_a.id or "", row_a.timestamp.isoformat(), row_a.type,
-                     row_a.asset.upper(), str(row_a.amount), row_a.currency.upper(),
-                     str(row_a.price) if row_a.price is not None else None,
-                     row_a.venue.lower(), row_a.note, fp_a, now),
-                )
-                results[0] = True
-            except sqlite3.IntegrityError:
-                pass
-            try:
-                self.conn.execute(
-                    """INSERT INTO ledger
-                       (id, timestamp, type, asset, amount, currency, price, venue, note, row_fp, imported_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (row_b.id or "", row_b.timestamp.isoformat(), row_b.type,
-                     row_b.asset.upper(), str(row_b.amount), row_b.currency.upper(),
-                     str(row_b.price) if row_b.price is not None else None,
-                     row_b.venue.lower(), row_b.note, fp_b, now),
-                )
-                results[1] = True
-            except sqlite3.IntegrityError:
-                pass
-        return tuple(results)
 
     def recent_rows(self, limit: int = 50) -> List[dict]:
         rows = self.conn.execute(
