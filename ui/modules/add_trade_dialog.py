@@ -74,6 +74,16 @@ def _try_dec(val: str) -> Optional[Decimal]:
         return None
 
 
+def _parse_fee(val: Optional[str]) -> tuple[Optional[Decimal], Optional[str]]:
+    """Volitelný poplatek: (None, None) = prázdné, (fee, None) = platné, (None, chyba) = neplatné."""
+    if not (val or "").strip():
+        return None, None
+    fee = _try_dec(val)
+    if fee is None or not fee.is_finite():
+        return None, "Poplatek musí být kladné číslo (nebo nech pole prázdné)"
+    return fee, None
+
+
 # ── Type selector ─────────────────────────────────────────────────────────────
 
 def open_add_trade_dialog(
@@ -167,6 +177,8 @@ def _form_buy_sell(
                              keyboard_type=ft.KeyboardType.NUMBER)
     total_tf  = ft.TextField(label="Celkem EUR", hint_text="1 402.50", width=170,
                              keyboard_type=ft.KeyboardType.NUMBER)
+    fee_tf    = ft.TextField(label="Poplatek EUR (volitelné)", hint_text="2.00", width=230,
+                             keyboard_type=ft.KeyboardType.NUMBER)
     venue_tf  = ft.TextField(label="Broker / Venue", hint_text="xtb, degiro, ibkr...", width=180)
     date_tf   = ft.TextField(label="Datum a čas",
                              value=datetime.now().strftime("%Y-%m-%d %H:%M:%S"), width=230)
@@ -208,11 +220,15 @@ def _form_buy_sell(
         if p and not t: t = Decimal(str(round(q * p, 2)))
         if t and not p: p = Decimal(str(round(t / q, 4)))
         if not t: _set_st(st, "Zadej EUR/ks nebo Celkem EUR", True, page); return
+        fee, fee_err = _parse_fee(fee_tf.value)
+        if fee_err: _set_st(st, fee_err, True, page); return
         try: ts = datetime.fromisoformat(date_tf.value.strip())
         except ValueError: _set_st(st, "Neplatné datum", True, page); return
+        # Celkem EUR = hodnota obchodu bez poplatku; poplatek jde do samostatného FEE řádku
         req = AddTradeRequestDTO(type=ttype, timestamp=ts, asset=ticker, amount=q,
                                  currency="EUR", price=p, quote_amount=t,
-                                 venue=venue, note=note_tf.value.strip() or None)
+                                 venue=venue, fee_amount=fee,
+                                 note=note_tf.value.strip() or None)
         r = add_trade(req, db_path)
         if r.success: _close(); on_after_add()
         else: _set_st(st, r.error_message or "Chyba", True, page)
@@ -226,6 +242,7 @@ def _form_buy_sell(
         ft.Divider(height=1),
         ft.Row([ticker_tf, qty_tf], spacing=12),
         ft.Row([price_tf, total_tf], spacing=12),
+        ft.Row([fee_tf], spacing=12),
         ft.Row([venue_tf, date_tf], spacing=12),
         note_tf, st,
         ft.Row([
