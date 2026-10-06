@@ -28,3 +28,6 @@ Thumbs.db
 
 # Exports (CSV s finančními daty — nikdy necommitovat)
 exports/
+
+# Importy (XTB výpisy s osobními daty — nikdy necommitovat)
+imports/
