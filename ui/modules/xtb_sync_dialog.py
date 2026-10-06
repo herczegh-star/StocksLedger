@@ -28,7 +28,12 @@ from core.services.position_sync import (
     SyncReport,
     TickerSync,
 )
-from core.services.ui_facade import get_export_dir, get_xtb_sync_report, import_xtb_missing
+from core.services.ui_facade import (
+    get_export_dir,
+    get_xtb_sync_report,
+    import_xtb_missing,
+    repair_xtb_different,
+)
 from ui.modules.add_trade_dialog import _card, _close_modal, _set_st, _show_modal, _status
 
 ALLOWED_EXTENSIONS = (".zip", ".xlsx")
@@ -94,8 +99,12 @@ def _reason_text(item: TickerSync) -> str:
         return f"{first}{more}"
     if item.state == DIFFERENT:
         diff = item.xtb_quantity - item.ledger_quantity
+        if item.repairable:
+            return (f"Lze doplnit chybějící {len(item.repair_lots)} lot/y (+{_fmt_qty(diff)} ks) "
+                    f"→ po doplnění {_fmt_qty(item.xtb_quantity)} ks.")
         sign = "+" if diff > 0 else ""
-        return f"Množství se liší: XTB − ledger = {sign}{_fmt_qty(diff)} ks."
+        text = f"Množství se liší: XTB − ledger = {sign}{_fmt_qty(diff)} ks."
+        return f"{text} Nelze automaticky doplnit: {item.repair_detail}" if item.repair_detail else text
     if item.state == LEDGER_ONLY:
         return "V otevřených pozicích XTB není."
     notes = []
@@ -126,14 +135,27 @@ def _planned_buys(report: SyncReport, tickers: Iterable[str]) -> List[Tuple[str,
     return result
 
 
-def _import_result_text(imported: Dict[str, int], rejected: Dict[str, str]) -> str:
+def _planned_repair_buys(report: SyncReport, tickers: Iterable[str]) -> List[Tuple[str, datetime, Decimal, Decimal]]:
+    """BUY, které doplnění přidá: jen chybějící loty vybraných opravitelných DIFFERENT tickerů."""
+    wanted = set(tickers)
+    result = []
+    for item in report.items:
+        if item.ticker not in wanted or item.state != DIFFERENT or not item.repairable:
+            continue
+        for rec in item.repair_lots:
+            result.append((item.ticker, rec.lot.open_time_local, rec.lot.volume, rec.cost))
+    return result
+
+
+def _import_result_text(imported: Dict[str, int], rejected: Dict[str, str], done: str = "Importováno",
+                        nothing: str = "Nic nebylo importováno.") -> str:
     lines = []
     if imported:
-        lines.append("Importováno: " + ", ".join(f"{t} ({n} lot/y)" for t, n in sorted(imported.items())))
+        lines.append(f"{done}: " + ", ".join(f"{t} ({n} lot/y)" for t, n in sorted(imported.items())))
     if rejected:
         lines.append("Odmítnuto:")
         lines += [f"  {t}: {reason}" for t, reason in sorted(rejected.items())]
-    return "\n".join(lines) if lines else "Nic nebylo importováno."
+    return "\n".join(lines) if lines else nothing
 
 
 # ── dialog ────────────────────────────────────────────────────────────────────
@@ -141,7 +163,7 @@ def _import_result_text(imported: Dict[str, int], rejected: Dict[str, str]) -> s
 def open_xtb_sync_dialog(page: ft.Page, db_path: str, on_after_change: Callable[[], None]) -> None:
     modal: list = [None]
     confirm_modal: list = [None]
-    state: dict = {"report": None, "path": None, "file": None, "selected": set()}
+    state: dict = {"report": None, "path": None, "file": None, "selected": set(), "repair": set()}
 
     picker = ft.FilePicker()   # systémový dialog Otevřít; reference drží službu naživu
     pick_btn = ft.ElevatedButton("Vybrat soubor…", icon=ft.Icons.FOLDER_OPEN, data="pick")
@@ -161,6 +183,8 @@ def open_xtb_sync_dialog(page: ft.Page, db_path: str, on_after_change: Callable[
     table = ft.Column(spacing=0, scroll=ft.ScrollMode.AUTO, height=360, data="table")
     import_btn = ft.ElevatedButton("Importovat vybrané (0)", icon=ft.Icons.DOWNLOAD_DONE,
                                    disabled=True, data="import")
+    repair_btn = ft.ElevatedButton("Doplnit chybějící loty (0)", icon=ft.Icons.PLAYLIST_ADD,
+                                   disabled=True, data="repair")
 
     def _close(_e=None): _close_modal(page, modal[0])
 
@@ -168,13 +192,16 @@ def open_xtb_sync_dialog(page: ft.Page, db_path: str, on_after_change: Callable[
         n = len(state["selected"])
         import_btn.content = f"Importovat vybrané ({n})"
         import_btn.disabled = n == 0
+        m = len(state["repair"])
+        repair_btn.content = f"Doplnit chybějící loty ({m})"
+        repair_btn.disabled = m == 0
 
-    def _on_check(ticker: str) -> Callable:
+    def _on_check(ticker: str, key: str = "selected") -> Callable:
         def _handler(e) -> None:
             if e.control.value:
-                state["selected"].add(ticker)
+                state[key].add(ticker)
             else:
-                state["selected"].discard(ticker)
+                state[key].discard(ticker)
             _update_import_button()
             page.update()
         return _handler
@@ -186,6 +213,7 @@ def open_xtb_sync_dialog(page: ft.Page, db_path: str, on_after_change: Callable[
     def _render(report: Optional[SyncReport]) -> None:
         table.controls.clear()
         state["selected"].clear()
+        state["repair"].clear()
         _update_import_button()
         if report is None:
             summary.value = ""
@@ -193,8 +221,13 @@ def open_xtb_sync_dialog(page: ft.Page, db_path: str, on_after_change: Callable[
         summary.value = _summary_text(report)
         table.controls.append(ft.Row([_cell(h, w, ft.Colors.GREY_400, True) for h, w in _COLUMNS], spacing=4))
         for item in report.items:
-            check = (ft.Checkbox(value=False, on_change=_on_check(item.ticker), data=f"check:{item.ticker}")
-                     if item.state == MISSING else ft.Container())
+            if item.state == MISSING:
+                check = ft.Checkbox(value=False, on_change=_on_check(item.ticker), data=f"check:{item.ticker}")
+            elif item.state == DIFFERENT and item.repairable:
+                check = ft.Checkbox(value=False, on_change=_on_check(item.ticker, "repair"),
+                                    data=f"repair:{item.ticker}")
+            else:
+                check = ft.Container()
             table.controls.append(ft.Row([
                 ft.Container(width=_COLUMNS[0][1], content=check),
                 _cell(item.ticker, _COLUMNS[1][1], bold=True),
@@ -257,45 +290,64 @@ def open_xtb_sync_dialog(page: ft.Page, db_path: str, on_after_change: Callable[
             return
         _compare(path)
 
-    def _do_import(_e=None) -> None:
+    def _run_write(action: Callable, key: str, done: str, nothing: str, failed: str) -> None:
         _close_modal(page, confirm_modal[0])
-        tickers = sorted(state["selected"])
+        tickers = sorted(state[key])
         path = state["path"]
-        r = import_xtb_missing(db_path, path, tickers)
+        r = action(db_path, path, tickers)
         if not r.success:
             result.value = ""
-            _set_st(st, r.error_message or "Import selhal.", True, page)
+            _set_st(st, r.error_message or failed, True, page)
             return
         _compare(path)                       # nové porovnání proti aktuální DB
-        result.value = _import_result_text(r.imported, r.rejected)
+        result.value = _import_result_text(r.imported, r.rejected, done, nothing)
         result.color = ft.Colors.RED_300 if r.rejected else ft.Colors.GREEN_400
         if r.imported:
             on_after_change()
         page.update()
+
+    def _confirm(title: str, intro: str, buys, action_label: str, on_confirm: Callable) -> None:
+        lines = [ft.Row([_cell(h, w, ft.Colors.GREY_400, True) for h, w in
+                         (("Ticker", 100), ("Datum", 160), ("Množství", 100), ("Náklad EUR", 110))], spacing=4)]
+        lines += [ft.Row([_cell(t, 100, bold=True), _cell(_fmt_time(d), 160), _cell(_fmt_qty(q), 100),
+                          _cell(_fmt_eur(c), 110)], spacing=4, data="buy") for t, d, q, c in buys]
+        confirm = _card(ft.Column([
+            ft.Text(title, size=17, weight=ft.FontWeight.BOLD, color=ft.Colors.BLUE_300),
+            ft.Text(intro, size=13),
+            ft.Column(lines, spacing=2, scroll=ft.ScrollMode.AUTO, height=min(300, 40 + 26 * len(buys))),
+            ft.Row([
+                ft.TextButton("Zpět", on_click=lambda _e: _close_modal(page, confirm_modal[0]), data="back"),
+                ft.ElevatedButton(action_label, icon=ft.Icons.DOWNLOAD_DONE, on_click=on_confirm,
+                                  data="confirm"),
+            ], alignment=ft.MainAxisAlignment.END),
+        ], spacing=12, tight=True), width=560)
+        confirm_modal[0] = _show_modal(page, confirm)
 
     def _on_import(_e=None) -> None:
         report = state["report"]
         if report is None or not state["selected"]:
             return
         buys = _planned_buys(report, state["selected"])
-        lines = [ft.Row([_cell(h, w, ft.Colors.GREY_400, True) for h, w in
-                         (("Ticker", 100), ("Datum", 160), ("Množství", 100), ("Náklad EUR", 110))], spacing=4)]
-        lines += [ft.Row([_cell(t, 100, bold=True), _cell(_fmt_time(d), 160), _cell(_fmt_qty(q), 100),
-                          _cell(_fmt_eur(c), 110)], spacing=4, data="buy") for t, d, q, c in buys]
-        confirm = _card(ft.Column([
-            ft.Text("Potvrdit import", size=17, weight=ft.FontWeight.BOLD, color=ft.Colors.BLUE_300),
-            ft.Text(f"Vytvoří se {len(buys)} BUY (akciová + EUR noha, bez poplatků, "
-                    "poznámka 'XTB position …'):", size=13),
-            ft.Column(lines, spacing=2, scroll=ft.ScrollMode.AUTO, height=min(300, 40 + 26 * len(buys))),
-            ft.Row([
-                ft.TextButton("Zpět", on_click=lambda _e: _close_modal(page, confirm_modal[0]), data="back"),
-                ft.ElevatedButton("Importovat", icon=ft.Icons.DOWNLOAD_DONE, on_click=_do_import,
-                                  data="confirm"),
-            ], alignment=ft.MainAxisAlignment.END),
-        ], spacing=12, tight=True), width=560)
-        confirm_modal[0] = _show_modal(page, confirm)
+        _confirm("Potvrdit import",
+                 f"Vytvoří se {len(buys)} BUY (akciová + EUR noha, bez poplatků, poznámka 'XTB position …'):",
+                 buys, "Importovat",
+                 lambda _e: _run_write(import_xtb_missing, "selected", "Importováno",
+                                       "Nic nebylo importováno.", "Import selhal."))
+
+    def _on_repair(_e=None) -> None:
+        report = state["report"]
+        if report is None or not state["repair"]:
+            return
+        buys = _planned_repair_buys(report, state["repair"])
+        _confirm("Potvrdit doplnění chybějících lotů",
+                 f"Do ledgeru se PŘIDÁ {len(buys)} BUY chybějících lotů (existující záznamy se nemění; "
+                 "bez poplatků, poznámka 'XTB position …'):",
+                 buys, "Doplnit",
+                 lambda _e: _run_write(repair_xtb_different, "repair", "Doplněno",
+                                       "Nic nebylo doplněno.", "Doplnění lotů selhalo."))
 
     import_btn.on_click = _on_import
+    repair_btn.on_click = _on_repair
     pick_btn.on_click = _on_pick
     compare_btn.on_click = _on_compare
 
@@ -309,6 +361,7 @@ def open_xtb_sync_dialog(page: ft.Page, db_path: str, on_after_change: Callable[
         ft.Row([pick_btn, compare_btn, selected_txt], spacing=12),
         path_tf,
         st, summary, table, result,
-        ft.Row([ft.TextButton("Zavřít", on_click=_close), import_btn], alignment=ft.MainAxisAlignment.END),
+        ft.Row([ft.TextButton("Zavřít", on_click=_close), repair_btn, import_btn],
+               alignment=ft.MainAxisAlignment.END),
     ], spacing=10, tight=True), width=1080)
     modal[0] = _show_modal(page, card)

@@ -327,3 +327,133 @@ class TestImport:
         r = import_xtb_missing(db, path, _ALL)
         assert all(FAKE_ACCOUNT not in str(v) for v in _raw_db(db))
         assert FAKE_ACCOUNT not in repr(r)
+
+
+# ── M5: doplnění chybějících lotů u DIFFERENT ─────────────────────────────────
+
+from core.services.position_sync import build_repair_rows  # noqa: E402
+from core.services.ui_facade import repair_xtb_different  # noqa: E402
+
+_LOT_A_UTC = datetime(2026, 2, 2, 14, 0, 0)       # → 15:00 Praha
+_LOT_B_UTC = datetime(2026, 5, 4, 13, 0, 0)       # → 15:00 Praha (letní čas)
+
+
+def _repair_statement() -> XtbStatementBuilder:
+    b = XtbStatementBuilder()
+    # GGG.US: ledger má lot A (5 ks / 50.00), chybí lot B (20 ks / 200.00) → opravitelný DIFFERENT
+    b.open_lot("71", "GGG.US", "5.0", _LOT_A_UTC, value="60.00", gross="10.00")
+    b.purchase("71", "GGG.US", "OPEN BUY 5 @ 10.00", "-50.00", _LOT_A_UTC)
+    b.open_lot("72", "GGG.US", "20.0", _LOT_B_UTC, value="230.00", gross="30.00")
+    b.purchase("72", "GGG.US", "OPEN BUY 20 @ 10.00", "-200.00", _LOT_B_UTC)
+    # HHH.US: ledger 4 ks, XTB lot 5 ks → DIFFERENT, nelze spárovat → neopravitelný
+    b.open_lot("81", "HHH.US", "5.0", _LOT_A_UTC, value="60", gross="10")
+    b.purchase("81", "HHH.US", "OPEN BUY 5 @ 10", "-50.00", _LOT_A_UTC)
+    # III.US: MISSING (cesta oprav ho musí odmítnout)
+    b.open_lot("91", "III.US", "1.0", _LOT_A_UTC, value="12", gross="2")
+    b.purchase("91", "III.US", "OPEN BUY 1 @ 10", "-10.00", _LOT_A_UTC)
+    return b
+
+
+@pytest.fixture
+def repair_setup(tmp_db, tmp_path):
+    _ledger_buy(tmp_db, "GGG.US", "5", "50.00", ts=datetime(2026, 2, 2, 15, 0, 40))
+    _ledger_buy(tmp_db, "HHH.US", "4", "40.00")
+    return tmp_db, _repair_statement().write_xlsx(tmp_path)
+
+
+class TestRepair:
+    def test_report(self, repair_setup):
+        db, path = repair_setup
+        items = {i.ticker: i for i in get_xtb_sync_report(db, path).report.items}
+        assert items["GGG.US"].state == DIFFERENT and items["GGG.US"].repairable
+        assert [r.lot.position_id for r in items["GGG.US"].repair_lots] == ["72"]
+        assert items["HHH.US"].state == DIFFERENT and not items["HHH.US"].repairable
+        assert items["III.US"].state == MISSING
+
+    def test_doplni_jen_chybejici_lot_a_nemeni_existujici(self, repair_setup):
+        db, path = repair_setup
+        before = _raw_db(db)
+        r = repair_xtb_different(db, path, ["GGG.US"])
+        assert r.success and r.imported == {"GGG.US": 1} and r.rejected == {}
+        after = _raw_db(db)
+        assert after[:len(before)] == before                         # existující řádky beze změny
+        added = [x for x in _rows(db) if x.note == "XTB position 72"]
+        assert len(after) == len(before) + 2 and len(added) == 2
+        stock = next(x for x in added if x.asset == "GGG.US")
+        cash = next(x for x in added if x.asset == "EUR")
+        assert stock.amount == _D("20") and cash.amount == _D("-200.00") and stock.type == cash.type == "BUY"
+        assert stock.timestamp == datetime(2026, 5, 4, 15, 0, 0) and not any(x.type == "FEE" for x in added)
+        holdings = {h.ticker: h for h in compute_holdings(_rows(db))}
+        assert holdings["GGG.US"].quantity == 25
+        assert _states(db, path)["GGG.US"] == MATCHED
+
+    def test_idempotence(self, repair_setup):
+        db, path = repair_setup
+        repair_xtb_different(db, path, ["GGG.US"])
+        after_first = _raw_db(db)
+        r = repair_xtb_different(db, path, ["GGG.US"])
+        assert r.imported == {} and MATCHED in r.rejected["GGG.US"]
+        assert _raw_db(db) == after_first
+
+    def test_neopravitelny_different_odmitnut(self, repair_setup):
+        db, path = repair_setup
+        before = _raw_db(db)
+        r = repair_xtb_different(db, path, ["HHH.US"])
+        assert r.imported == {} and "Nelze automaticky doplnit" in r.rejected["HHH.US"]
+        assert _raw_db(db) == before
+
+    def test_missing_cestou_oprav_odmitnut_a_naopak(self, repair_setup):
+        db, path = repair_setup
+        before = _raw_db(db)
+        r1 = repair_xtb_different(db, path, ["III.US"])
+        assert r1.imported == {} and MISSING in r1.rejected["III.US"]
+        r2 = import_xtb_missing(db, path, ["GGG.US"])                # import MISSING beze změny chování
+        assert r2.imported == {} and DIFFERENT in r2.rejected["GGG.US"]
+        assert _raw_db(db) == before
+
+    def test_plan_se_prepocita_proti_aktualni_db(self, repair_setup):
+        db, path = repair_setup
+        assert get_xtb_sync_report(db, path).report is not None     # report: GGG opravitelný
+        _ledger_buy(db, "GGG.US", "20", "200.00", ts=datetime(2026, 5, 4, 15, 0, 20))   # mezitím ručně
+        before = _raw_db(db)
+        r = repair_xtb_different(db, path, ["GGG.US"])
+        assert r.imported == {} and MATCHED in r.rejected["GGG.US"]
+        assert _raw_db(db) == before
+
+    def test_nelze_preplnit_po_zmene_db(self, repair_setup):
+        db, path = repair_setup
+        _ledger_buy(db, "GGG.US", "10", "100.00", ts=datetime(2026, 3, 1, 12, 0, 0))   # nespárovatelný BUY
+        before = _raw_db(db)
+        r = repair_xtb_different(db, path, ["GGG.US"])
+        assert r.imported == {} and "Nelze automaticky doplnit" in r.rejected["GGG.US"]
+        assert _raw_db(db) == before
+        assert {h.ticker: h.quantity for h in compute_holdings(_rows(db))}["GGG.US"] == 15
+
+    def test_atomicky_per_ticker(self, repair_setup):
+        db, path = repair_setup
+        store = LedgerStore(db)
+        try:   # cizí řádek se stejným row_fp jako EUR noha doplňovaného lotu
+            store.insert(RawRow(id="OTHER", timestamp=datetime(2026, 5, 4, 15, 0, 0), type="BUY",
+                                asset="EUR", amount=_D("-200.00"), currency="EUR", price=_D("1"), venue="xtb"))
+        finally:
+            store.close()
+        before = _raw_db(db)
+        r = repair_xtb_different(db, path, ["GGG.US"])
+        assert r.imported == {} and "Duplicitní transakce" in r.rejected["GGG.US"]
+        assert _raw_db(db) == before
+
+    def test_build_repair_rows_jen_opravitelny(self, repair_setup):
+        db, path = repair_setup
+        items = {i.ticker: i for i in get_xtb_sync_report(db, path).report.items}
+        store = LedgerStore(db)
+        try:
+            for ticker in ("HHH.US", "III.US"):
+                with pytest.raises(ValueError):
+                    build_repair_rows(items[ticker], "EUR", store.conn)
+        finally:
+            store.close()
+
+    def test_cislo_uctu_nikde(self, repair_setup):
+        db, path = repair_setup
+        r = repair_xtb_different(db, path, ["GGG.US", "HHH.US", "III.US"])
+        assert all(FAKE_ACCOUNT not in str(v) for v in _raw_db(db)) and FAKE_ACCOUNT not in repr(r)

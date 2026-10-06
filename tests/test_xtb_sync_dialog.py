@@ -349,3 +349,87 @@ class TestFilePick:
         shown = _display_path(r"C:\Users\x\XTB_VÝPISY\EUR_12345678_2006-01-01_2026-10-06.xlsx")
         assert "12345678" not in shown and "EUR_••••_2006-01-01_2026-10-06.xlsx" in shown
         assert "XTB_VÝPISY" in shown
+
+
+# ── M5: doplnění chybějících lotů u DIFFERENT v dialogu ───────────────────────
+
+from tests.test_position_sync_import import _repair_statement  # noqa: E402
+
+
+@pytest.fixture
+def repair_setup(tmp_db, tmp_path):
+    _ledger_buy(tmp_db, "GGG.US", "5", "50.00", ts=datetime(2026, 2, 2, 15, 0, 40))
+    _ledger_buy(tmp_db, "HHH.US", "4", "40.00")
+    return tmp_db, _repair_statement().write_xlsx(tmp_path)
+
+
+def _check_box(d, data, value=True):
+    box = _one(d.root, data)
+    box.value = value
+    box.on_change(SimpleNamespace(control=box))
+
+
+class TestRepairDialog:
+    def test_checkbox_jen_u_opravitelneho_different(self, repair_setup):
+        db, path = repair_setup
+        d = _Dialog(db)
+        d.compare(path)
+        assert [c.data for c in _with_prefix(d.root, "repair:")] == ["repair:GGG.US"]
+        assert [c.data for c in _with_prefix(d.root, "check:")] == ["check:III.US"]   # MISSING zvlášť
+        assert _one(d.root, "repair").disabled is True
+
+    def test_duvod_v_tabulce(self, repair_setup):
+        db, path = repair_setup
+        rep = _report(db, path)
+        assert "Lze doplnit chybějící 1 lot/y (+20 ks) → po doplnění 25 ks." == _reason_text(_item(rep, "GGG.US"))
+        assert "Nelze automaticky doplnit:" in _reason_text(_item(rep, "HHH.US"))
+
+    def test_oddeleny_vyber_a_tlacitka(self, repair_setup):
+        db, path = repair_setup
+        d = _Dialog(db)
+        d.compare(path)
+        _check_box(d, "repair:GGG.US")
+        assert _one(d.root, "repair").disabled is False
+        assert _one(d.root, "repair").content == "Doplnit chybějící loty (1)"
+        assert d.import_button.disabled is True                      # MISSING import se nemíchá
+        d.check("III.US")
+        assert d.import_button.content == "Importovat vybrané (1)"
+        assert _one(d.root, "repair").content == "Doplnit chybějící loty (1)"
+
+    def test_potvrzeni_jen_chybejici_lot_a_zpet(self, repair_setup):
+        db, path = repair_setup
+        n = _row_count(db)
+        d = _Dialog(db)
+        d.compare(path)
+        _check_box(d, "repair:GGG.US")
+        _one(d.root, "repair").on_click(None)
+        confirm = d.confirm_dialog
+        assert len(_find(confirm, "buy")) == 1
+        texts = d.texts(confirm)
+        assert "2026-05-04 15:00:00" in texts and "20" in texts and "200.00" in texts
+        assert any("PŘIDÁ 1 BUY" in t for t in texts)
+        _one(confirm, "back").on_click(None)
+        assert _row_count(db) == n
+
+    def test_doplneni_nove_porovnani_a_refresh(self, repair_setup):
+        db, path = repair_setup
+        n = _row_count(db)
+        d = _Dialog(db)
+        d.compare(path)
+        _check_box(d, "repair:GGG.US")
+        _one(d.root, "repair").on_click(None)
+        _one(d.confirm_dialog, "confirm").on_click(None)
+        assert _row_count(db) == n + 2
+        assert "Doplněno: GGG.US (1 lot/y)" in _one(d.root, "result").value
+        assert d.refreshed == 1
+        assert _states_from_dialog(d)["GGG.US"] == MATCHED
+        assert _with_prefix(d.root, "repair:") == [] and _one(d.root, "repair").disabled is True
+
+
+def _states_from_dialog(d):
+    states = {}
+    for row in _with_prefix(d.root, "row:"):
+        ticker = row.data.split(":", 1)[1]
+        texts = [c.value for c in _walk(row) if isinstance(c, ft.Text)]
+        states[ticker] = texts[1]                                    # sloupec Stav
+    return states

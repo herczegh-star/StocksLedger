@@ -277,3 +277,138 @@ class TestWithParsedStatement:
             "AAA.US": MATCHED, "BBB.US": MISSING, "CCC.US": CANNOT_IMPORT,
             "DDD.US": DIFFERENT, "EEE.US": LEDGER_ONLY}
         assert _item(rep, "BBB.US").lots[0].cost == _D("33.33")
+
+
+# ── M5: oprava DIFFERENT doplněním chybějících lotů ───────────────────────────
+
+from core.services.position_sync import (  # noqa: E402
+    ALREADY_IMPORTED,
+    AMBIGUOUS_MATCH,
+    LEDGER_CHANGED_AFTER_AS_OF,
+    LEDGER_HAS_SELL,
+    MISSING_LOT_NOT_RECONSTRUCTABLE,
+    UNMATCHED_LEDGER_BUY,
+    XTB_NOT_GREATER,
+)
+
+_R = "RRR.US"
+
+
+def _rlot(position, volume, cost, day=1, merged=False, gross="0"):
+    """Lot RRR.US s náklady: nákup = cost, Value − Gross Profit = cost (pokud gross="0")."""
+    comment = f"OPEN BUY 0.5/{volume} @ 1" if merged else f"OPEN BUY {volume} @ 1"
+    amount = "-0.50" if merged else f"-{cost}"
+    return _lot(volume=volume, ticker=_R, position=position, value=cost, gross=gross,
+                open_time=datetime(2026, 2, day, 15, 0, 0),
+                purchases=[_purchase(comment, amount, ticker=_R, position=position)])
+
+
+def _rbuy(qty, total, day=1, trade_id=None, note=None, type_="BUY"):
+    rows = build_trade_rows(AddTradeInput(type_, datetime(2026, 2, day, 15, 0, 30), _R, _D(qty), "EUR",
+                                          _D(total), "xtb", note=note),
+                            trade_id=trade_id or f"R-{type_}-{qty}-{total}-{day}")
+    return rows
+
+
+def _qbts_like():
+    """Rozdíl 20 ks lze množstvím vysvětlit více podmnožinami; jednoznačný je až podle nákladu."""
+    lots = (_rlot("1", "5", "108.81", 1), _rlot("2", "15", "236.14", 2), _rlot("3", "5", "76.28", 3),
+            _rlot("4", "20", "302.60", 4), _rlot("5", "4.0449", "86.56", 5, merged=True))
+    ledger = (_rbuy("5", "108.81", 1) + _rbuy("15", "236.14", 2) + _rbuy("5", "76.28", 3)
+              + _rbuy("4.0449", "86.56", 9))                       # sloučený lot: jiné datum, páruje se
+    return lots, ledger
+
+
+class TestRepairPlan:
+    def test_opravitelny_jen_chybejici_lot(self):
+        lots, ledger = _qbts_like()
+        item = _item(compare_positions(_snapshot(*lots), ledger), _R)
+        assert item.state == DIFFERENT and item.repairable
+        assert [r.lot.position_id for r in item.repair_lots] == ["4"]
+        assert item.ledger_quantity + sum(r.lot.volume for r in item.repair_lots) == item.xtb_quantity
+        assert item.repair_reason is None
+
+    def test_sloucene_loty_se_mohou_parovat_jako_existujici(self):
+        lots, ledger = _qbts_like()
+        item = _item(compare_positions(_snapshot(*lots), ledger), _R)
+        assert any(r.reason == MERGED_POSITION for r in item.lots)     # lot 5 sloučený, ale spárovaný
+        assert item.repairable
+
+    def test_remiza_rozhodne_stejny_den(self):
+        lots = (_rlot("1", "5", "50.00", 1), _rlot("2", "5", "50.00", 2))
+        item = _item(compare_positions(_snapshot(*lots), _rbuy("5", "50.00", 2)), _R)
+        assert item.repairable and [r.lot.position_id for r in item.repair_lots] == ["1"]
+
+    def test_nerozhodnutelna_remiza(self):
+        lots = (_rlot("1", "5", "50.00", 1), _rlot("2", "5", "50.00", 2))
+        item = _item(compare_positions(_snapshot(*lots), _rbuy("5", "50.00", 7)), _R)
+        assert not item.repairable and item.repair_reason == AMBIGUOUS_MATCH
+
+    def test_tolerance_nakladu_cent(self):
+        lots = (_rlot("1", "5", "50.00"), _rlot("2", "3", "30.00", 2))
+        assert _item(compare_positions(_snapshot(*lots), _rbuy("5", "50.01")), _R).repairable
+        item = _item(compare_positions(_snapshot(*lots), _rbuy("5", "50.02")), _R)
+        assert item.repair_reason == UNMATCHED_LEDGER_BUY
+
+    def test_nesparovany_ledger_buy(self):
+        lots = (_rlot("1", "5", "50.00"), _rlot("2", "3", "30.00", 2))
+        item = _item(compare_positions(_snapshot(*lots), _rbuy("4", "40.00")), _R)
+        assert not item.repairable and item.repair_reason == UNMATCHED_LEDGER_BUY
+
+    def test_ledger_buy_bez_penezni_nohy(self):
+        lots = (_rlot("1", "5", "50.00"), _rlot("2", "3", "30.00", 2))
+        orphan = [r for r in _rbuy("5", "50.00") if r.asset == _R]
+        item = _item(compare_positions(_snapshot(*lots), orphan), _R)
+        assert item.repair_reason == UNMATCHED_LEDGER_BUY
+
+    def test_ledger_ma_sell(self):
+        lots = (_rlot("1", "5", "50.00"), _rlot("2", "3", "30.00", 2))
+        ledger = _rbuy("5", "50.00") + _rbuy("6", "60.00", 3) + _rbuy("6", "70.00", 4, type_="SELL")
+        item = _item(compare_positions(_snapshot(*lots), ledger), _R)
+        assert not item.repairable and item.repair_reason == LEDGER_HAS_SELL
+
+    def test_xtb_mene_nez_ledger(self):
+        item = _item(compare_positions(_snapshot(_rlot("1", "5", "50.00")), _rbuy("7", "70.00")), _R)
+        assert item.state == DIFFERENT and item.repair_reason == XTB_NOT_GREATER
+
+    def test_chybejici_lot_slouceny(self):
+        lots = (_rlot("1", "5", "50.00"), _rlot("2", "3", "30.00", 2, merged=True))
+        item = _item(compare_positions(_snapshot(*lots), _rbuy("5", "50.00")), _R)
+        assert not item.repairable and item.repair_reason == MISSING_LOT_NOT_RECONSTRUCTABLE
+
+    def test_chybejici_lot_neprojde_guardem(self):
+        lots = (_rlot("1", "5", "50.00"), _rlot("2", "3", "30.00", 2, gross="-1.00"))   # XTB 31 vs nákup 30
+        item = _item(compare_positions(_snapshot(*lots), _rbuy("5", "50.00")), _R)
+        assert item.repair_reason == MISSING_LOT_NOT_RECONSTRUCTABLE
+
+    def test_parovani_podle_poznamky(self):
+        lots = (_rlot("1", "5", "50.00"), _rlot("2", "5", "50.00"), _rlot("3", "3", "30.00", 3))
+        ledger = _rbuy("5", "49.00", note="XTB position 2")            # náklad nesedí, páruje poznámka
+        ledger += _rbuy("5", "50.00", 1)
+        item = _item(compare_positions(_snapshot(*lots), ledger), _R)
+        assert item.repairable and [r.lot.position_id for r in item.repair_lots] == ["3"]
+
+    def test_poznamka_s_jinym_mnozstvim(self):
+        lots = (_rlot("1", "5", "50.00"), _rlot("2", "3", "30.00", 2))
+        item = _item(compare_positions(_snapshot(*lots), _rbuy("4", "40.00", note="XTB position 1")), _R)
+        assert item.repair_reason == UNMATCHED_LEDGER_BUY
+
+    def test_marker_chybejiciho_lotu_uz_aktivni(self):
+        lots = (_rlot("1", "5", "50.00"), _rlot("2", "3", "30.00", 2))
+        other = build_trade_rows(AddTradeInput("BUY", _T, "ZZZ.US", _D(1), "EUR", _D(1), "xtb",
+                                               note="XTB position 2"), trade_id="Z")
+        item = _item(compare_positions(_snapshot(*lots), _rbuy("5", "50.00") + other), _R)
+        assert item.repair_reason == ALREADY_IMPORTED
+
+    def test_zaznam_po_as_of(self):
+        lots = (_rlot("1", "5", "50.00"), _rlot("2", "3", "30.00", 2))
+        late = build_trade_rows(AddTradeInput("BUY", datetime(2026, 10, 8), _R, _D(1), "EUR", _D(9), "xtb"),
+                                trade_id="LATE")
+        item = _item(compare_positions(_snapshot(*lots), _rbuy("5", "50.00") + late), _R)
+        assert item.repair_reason == LEDGER_CHANGED_AFTER_AS_OF
+
+    def test_ostatni_stavy_nejsou_opravitelne(self):
+        rep = compare_positions(_snapshot(_lot(), _rlot("1", "5", "50.00")), _rbuy("5", "50.00"))
+        for item in rep.items:
+            assert item.state in (MISSING, MATCHED)
+            assert item.repairable is False and item.repair_lots == () and item.repair_reason is None

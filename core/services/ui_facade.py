@@ -12,6 +12,7 @@ Public API:
     get_export_dir()                  -> str  (<StocksLedger root>/exports)
     get_xtb_sync_report(db_path, statement_path)        -> XtbSyncReportDTO
     import_xtb_missing(db_path, statement_path, tickers) -> XtbImportResultDTO
+    repair_xtb_different(db_path, statement_path, tickers) -> XtbImportResultDTO
 
 Typy transakcí:
     BUY / SELL   → double-entry přes trade_service (asset leg + currency leg)
@@ -592,3 +593,30 @@ def import_xtb_missing(db_path: str, statement_path: str, tickers: List[str]) ->
     except Exception as exc:
         logger.error("XTB import selhal: %s", exc)
         return XtbImportResultDTO(success=False, error_message=f"Import selhal: {exc}")
+
+
+def repair_xtb_different(db_path: str, statement_path: str, tickers: List[str]) -> XtbImportResultDTO:
+    """Doplní chybějící XTB loty vybraných opravitelných DIFFERENT tickerů (per ticker atomicky).
+
+    Plán opravy se znovu spočítá proti aktuální DB těsně před zápisem; jen přidává BUY.
+    `imported` = {ticker: počet doplněných lotů}. Nikdy nevyvolá výjimku.
+    """
+    from core.services.position_sync import repair_different_tickers
+    from io_module.xtb_statement import XtbStatementError, load_xtb_open_positions
+
+    try:
+        if not os.path.exists(db_path):
+            return XtbImportResultDTO(success=False, error_message=f"Databáze '{db_path}' neexistuje.")
+        snapshot = load_xtb_open_positions(statement_path)
+        store = LedgerStore(db_path)
+        try:
+            repaired, rejected = repair_different_tickers(store, snapshot, tickers)
+        finally:
+            store.close()
+        logger.info("XTB oprava DIFFERENT: doplněno %s, odmítnuto %s", repaired, sorted(rejected))
+        return XtbImportResultDTO(success=True, imported=repaired, rejected=rejected)
+    except XtbStatementError as exc:
+        return XtbImportResultDTO(success=False, error_message=str(exc))
+    except Exception as exc:
+        logger.error("XTB oprava DIFFERENT selhala: %s", exc)
+        return XtbImportResultDTO(success=False, error_message=f"Doplnění lotů selhalo: {exc}")
