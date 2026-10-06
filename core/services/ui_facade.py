@@ -10,6 +10,8 @@ Public API:
     get_portfolio_snapshot(db_path)   -> PortfolioSnapshotDTO
     export_ledger_tax(db_path, date_to, export_dir) -> ExportResultDTO
     get_export_dir()                  -> str  (<StocksLedger root>/exports)
+    get_xtb_sync_report(db_path, statement_path)        -> XtbSyncReportDTO
+    import_xtb_missing(db_path, statement_path, tickers) -> XtbImportResultDTO
 
 Typy transakcí:
     BUY / SELL   → double-entry přes trade_service (asset leg + currency leg)
@@ -29,6 +31,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 if TYPE_CHECKING:
+    from core.services.position_sync import SyncReport
     from core.services.reentry_engine import SellEventRaw
 
 logger = logging.getLogger(__name__)
@@ -94,6 +97,21 @@ class AddTradeRequestDTO:
 class AddTradeResultDTO:
     success: bool
     n_rows_added: int
+    error_message: Optional[str] = None
+
+
+@dataclass
+class XtbSyncReportDTO:
+    success: bool
+    report: Optional["SyncReport"] = None
+    error_message: Optional[str] = None
+
+
+@dataclass
+class XtbImportResultDTO:
+    success: bool
+    imported: Dict[str, int] = field(default_factory=dict)    # ticker -> počet importovaných lotů
+    rejected: Dict[str, str] = field(default_factory=dict)    # ticker -> důvod odmítnutí
     error_message: Optional[str] = None
 
 
@@ -528,3 +546,49 @@ def export_ledger_tax(
         msg = f"Export LEDGER_TAX selhal: {exc}"
         logger.error(msg)
         return ExportResultDTO(success=False, error_message=msg)
+
+
+# ── XTB sync ──────────────────────────────────────────────────────────────────
+
+def get_xtb_sync_report(db_path: str, statement_path: str) -> XtbSyncReportDTO:
+    """Načte XTB výpis a porovná ho s ledgerem. Pouze čte; nikdy nevyvolá výjimku."""
+    from core.services.position_sync import compare_positions
+    from io_module.xtb_statement import XtbStatementError, load_xtb_open_positions
+
+    try:
+        if not os.path.exists(db_path):
+            return XtbSyncReportDTO(success=False, error_message=f"Databáze '{db_path}' neexistuje.")
+        snapshot = load_xtb_open_positions(statement_path)
+        return XtbSyncReportDTO(success=True, report=compare_positions(snapshot, get_ledger_rows(db_path)))
+    except XtbStatementError as exc:
+        return XtbSyncReportDTO(success=False, error_message=str(exc))
+    except Exception as exc:
+        logger.error("XTB sync report selhal: %s", exc)
+        return XtbSyncReportDTO(success=False, error_message=f"Porovnání selhalo: {exc}")
+
+
+def import_xtb_missing(db_path: str, statement_path: str, tickers: List[str]) -> XtbImportResultDTO:
+    """Importuje vybrané MISSING tickery z XTB výpisu (per ticker atomicky).
+
+    Výpis se znovu načte a porovná s aktuální DB těsně před zápisem.
+    Nikdy nevyvolá výjimku — chyby jdou do error_message / rejected.
+    """
+    from core.services.position_sync import import_missing_tickers
+    from io_module.xtb_statement import XtbStatementError, load_xtb_open_positions
+
+    try:
+        if not os.path.exists(db_path):
+            return XtbImportResultDTO(success=False, error_message=f"Databáze '{db_path}' neexistuje.")
+        snapshot = load_xtb_open_positions(statement_path)
+        store = LedgerStore(db_path)
+        try:
+            imported, rejected = import_missing_tickers(store, snapshot, tickers)
+        finally:
+            store.close()
+        logger.info("XTB import: importováno %s, odmítnuto %s", imported, sorted(rejected))
+        return XtbImportResultDTO(success=True, imported=imported, rejected=rejected)
+    except XtbStatementError as exc:
+        return XtbImportResultDTO(success=False, error_message=str(exc))
+    except Exception as exc:
+        logger.error("XTB import selhal: %s", exc)
+        return XtbImportResultDTO(success=False, error_message=f"Import selhal: {exc}")

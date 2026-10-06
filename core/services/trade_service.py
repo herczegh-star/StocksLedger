@@ -10,7 +10,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
-from typing import FrozenSet, List, Optional
+from typing import FrozenSet, List, Optional, Set
 
 from core.ledger_store import LedgerStore
 from core.model import RawRow
@@ -24,12 +24,16 @@ def generate_canonical_id(
     venue: str,
     type_str: str,
     conn,
+    reserved: Optional[Set[str]] = None,
 ) -> str:
     """Canonical ID: yyyymmdd_hhmmss_VENUE_TYPE_SEQ.
 
     SEQ = nejvyšší existující číselný suffix pro daný prefix + 1 (ne COUNT),
     aby po DELETE nevzniklo ID, které už patří jiné existující transakci.
     Prefix se porovnává přes SUBSTR — v LIKE by '_' fungovalo jako wildcard.
+
+    reserved: ID už přidělená v rozpracované dávce (ještě nezapsaná v DB);
+    započítají se do MAX, aby více transakcí ve stejné sekundě dostalo různá ID.
     """
     ts_part = timestamp.strftime("%Y%m%d_%H%M%S")
     venue_upper = venue.upper()
@@ -40,7 +44,8 @@ def generate_canonical_id(
         "SELECT DISTINCT id FROM ledger WHERE SUBSTR(id, 1, ?) = ?",
         (len(prefix), prefix),
     ).fetchall()
-    suffixes = [row[0][len(prefix):] for row in rows]
+    ids = [row[0] for row in rows] + [i for i in (reserved or ()) if i.startswith(prefix)]
+    suffixes = [i[len(prefix):] for i in ids]
     seq = max((int(s) for s in suffixes if s.isdigit()), default=0) + 1
     return f"{prefix}{seq:03d}"
 

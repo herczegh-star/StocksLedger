@@ -16,17 +16,22 @@ MATCHED/DIFFERENT neovlivní; rekonstrukce lotů rozhoduje jen mezi MISSING a CA
 Ledger: jen venue "xtb" a řádky s timestamp ≤ as_of výpisu. Storna (REVERSAL)
 platí bez ohledu na datum — jde o opravu chybného zápisu, ne o ekonomickou událost.
 
-Žádné I/O, žádné zápisy do DB.
+Porovnání (reconstruct_lot, compare_positions) je čisté, bez I/O.
+Import (M3, import_missing_tickers) zapisuje jen vybrané MISSING tickery:
+každý XTB lot = jedna BUY skupina (akciová + EUR noha, bez FEE) s poznámkou
+"XTB position <Position ID>", per ticker atomicky přes insert_group.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import ROUND_HALF_EVEN, Decimal
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
+from core.ledger_store import DuplicateRowError, LedgerStore
 from core.model import RawRow
 from core.services.holdings_engine import compute_holdings, reversed_trade_ids
+from core.services.trade_service import AddTradeInput, build_trade_rows, generate_canonical_id
 from io_module.xtb_statement import XtbOpenLot, XtbOpenPositionsSnapshot
 
 MATCHED = "MATCHED"
@@ -201,3 +206,100 @@ def _ledger_buy_dates(rows: List[RawRow]) -> Dict[str, Tuple[datetime, ...]]:
             continue
         seen.setdefault(r.asset, {}).setdefault(r.id, r.timestamp)
     return {ticker: tuple(sorted(groups.values())) for ticker, groups in seen.items()}
+
+
+# ── import vybraných MISSING tickerů (M3) ─────────────────────────────────────
+
+IMPORT_NOTE_PREFIX = "XTB position "
+
+
+def import_note(position_id: str) -> str:
+    """Auditní poznámka importované BUY skupiny (nikdy neobsahuje číslo účtu)."""
+    return f"{IMPORT_NOTE_PREFIX}{position_id}"
+
+
+def build_import_rows(item: TickerSync, currency: str, conn,
+                      reserved: Optional[Set[str]] = None) -> List[RawRow]:
+    """BUY skupiny pro všechny loty MISSING tickeru: akciová + EUR noha, bez FEE.
+
+    Náklad = rekonstruovaný EUR náklad lotu (nikdy Value − Gross Profit).
+    reserved: ID přidělená v této dávce — doplní se o nově přidělená.
+    Raises ValueError, pokud ticker není MISSING nebo některý lot není importovatelný.
+    """
+    if item.state != MISSING:
+        raise ValueError(f"{item.ticker}: importovat lze jen stav {MISSING}, ne {item.state}.")
+    if not item.lots or not all(r.importable and r.cost is not None for r in item.lots):
+        raise ValueError(f"{item.ticker}: některý lot nelze bezpečně rekonstruovat.")
+
+    reserved = set() if reserved is None else reserved
+    rows: List[RawRow] = []
+    for rec in item.lots:
+        lot = rec.lot
+        trade_id = generate_canonical_id(lot.open_time_local, SYNC_VENUE, "BUY", conn, reserved)
+        reserved.add(trade_id)
+        rows += build_trade_rows(
+            AddTradeInput(
+                type="BUY",
+                timestamp=lot.open_time_local,
+                base_asset=item.ticker,
+                base_amount=_plain(lot.volume),
+                quote_currency=currency,
+                quote_amount=rec.cost,
+                venue=SYNC_VENUE,
+                note=import_note(lot.position_id),
+            ),
+            trade_id=trade_id,
+        )
+    return rows
+
+
+def import_missing_tickers(
+    store: LedgerStore,
+    snapshot: XtbOpenPositionsSnapshot,
+    tickers: Iterable[str],
+) -> Tuple[Dict[str, int], Dict[str, str]]:
+    """Importuje vybrané tickery; vrátí ({ticker: počet lotů}, {ticker: důvod odmítnutí}).
+
+    Před zápisem znovu porovná výpis s aktuálním stavem DB (nevěří starému reportu).
+    Zapisuje jen MISSING; každý ticker atomicky (všechny loty, nebo nic).
+    """
+    imported: Dict[str, int] = {}
+    rejected: Dict[str, str] = {}
+    rows = store.timeline()
+    report = compare_positions(snapshot, rows)
+    items = {i.ticker: i for i in report.items}
+
+    reversed_ids = reversed_trade_ids(rows)
+    active_notes = {r.note for r in rows if r.type != "REVERSAL" and r.id not in reversed_ids and r.note}
+    after_as_of = {r.asset for r in rows if r.venue == SYNC_VENUE and r.type != "REVERSAL"
+                   and r.timestamp > snapshot.as_of_local}
+
+    reserved: Set[str] = set()
+    for ticker in dict.fromkeys(t.strip().upper() for t in tickers if t and t.strip()):
+        item = items.get(ticker)
+        if item is None or not item.lots:
+            rejected[ticker] = "Ticker není mezi otevřenými pozicemi ve výpisu."
+            continue
+        if item.state != MISSING:
+            rejected[ticker] = f"Stav {item.state} — importovat lze jen {MISSING}."
+            continue
+        if any(import_note(r.lot.position_id) in active_notes for r in item.lots):
+            rejected[ticker] = "Lot tohoto tickeru už byl dříve importován (XTB position v ledgeru)."
+            continue
+        if ticker in after_as_of:
+            rejected[ticker] = ("Ledger obsahuje záznam tohoto tickeru po datu výpisu — "
+                                "použijte aktuální výpis.")
+            continue
+        try:
+            group = build_import_rows(item, snapshot.currency, store.conn, reserved)
+            store.insert_group(group)
+        except (ValueError, DuplicateRowError) as exc:
+            rejected[ticker] = str(exc)
+            continue
+        imported[ticker] = len(item.lots)
+    return imported, rejected
+
+
+def _plain(value: Decimal) -> Decimal:
+    """Bez zbytečných nul a bez exponentu (10.0 → 10, ne 1E+1)."""
+    return Decimal(format(value.normalize(), "f"))
