@@ -9,7 +9,7 @@ import logging
 import threading
 import time
 from decimal import Decimal
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import flet as ft
 
@@ -25,6 +25,7 @@ BLUE     = "#1d4ed8"
 BLUE_300 = "#93c5fd"
 GREEN    = "#22c55e"
 RED      = "#ef4444"
+AMBER    = "#f59e0b"
 
 _SORT_FIELDS = [
     ("roi",  "ROI %"),
@@ -32,6 +33,31 @@ _SORT_FIELDS = [
     ("val",  "Value"),
     ("name", "Name"),
 ]
+
+
+# ── KPI helpers (čisté funkce) ────────────────────────────────────────────────
+
+def _portfolio_value(s: PortfolioSnapshotDTO) -> Optional[Decimal]:
+    """Portfolio Value = aktuální tržní hodnota oceněných otevřených pozic.
+
+    Vklady/výběry (CASH_IN/CASH_OUT) jsou historické toky financování, ne aktuální
+    aktivum — do Portfolio Value se nezapočítávají.
+    """
+    return s.portfolio_value
+
+
+def _priced_status(positions: List[PositionDTO], prices_loaded: bool) -> Tuple[str, bool]:
+    """Indikátor oceněných pozic: (text, varování). Neoceněné pozice se nikdy nevynechají potichu."""
+    total = len(positions)
+    if total == 0:
+        return "", False
+    if not prices_loaded:
+        return f"Priced positions: …/{total} (loading quotes)", False
+    missing = [p.ticker for p in positions if p.spot_price is None]
+    text = f"Priced positions: {total - len(missing)}/{total}"
+    if missing:
+        return f"{text} — no quote: {', '.join(missing)} (excluded from value, P&L, ROI)", True
+    return text, False
 
 
 # ── Formátovací helpers ───────────────────────────────────────────────────────
@@ -133,11 +159,13 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
     _sort = {"field": "roi", "asc": False}
     _names: list = [{}]
     _gen: list = [0]   # generační čítač — chrání před stale background updates
+    _prices_loaded: list = [False]   # True po aplikaci snapshotu s cenami (i když některé chybí)
 
     # ── KPI widgets ───────────────────────────────────────────────────────────
     w_val      = ft.Text("—", size=22, weight=ft.FontWeight.BOLD, color=T_MUT)
     w_invested = ft.Text("", size=11, color=T_MUT)   # "Net Invested: X EUR"
-    w_cash     = ft.Text("", size=11, color=T_MUT)   # "Free Cash: X EUR"
+    w_cash     = ft.Text("", size=11, color=T_MUT)   # "Net deposits (info): X EUR"
+    w_priced   = ft.Text("", size=11, color=T_MUT)   # "Priced positions: N/M"
     w_pnl      = ft.Text("—", size=22, weight=ft.FontWeight.BOLD, color=T_MUT)
     w_roi      = ft.Text("—", size=22, weight=ft.FontWeight.BOLD, color=T_MUT)
 
@@ -167,25 +195,26 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
 
         deposits_eur = s.net_deposits_by_currency.get("EUR", Decimal("0"))  # CASH_IN − CASH_OUT
 
-        # Portfolio Value = hodnota pozic + čisté vklady (CASH_IN − CASH_OUT)
-        if s.portfolio_value is not None:
-            total = s.portfolio_value + deposits_eur
-            w_val.value = _fmt_price(total, "EUR")
+        # Portfolio Value = tržní hodnota oceněných otevřených pozic (bez vkladů)
+        value = _portfolio_value(s)
+        if value is not None:
+            w_val.value = _fmt_price(value, "EUR")
             w_val.color = T_PRI
-        elif deposits_eur > Decimal("0"):
-            w_val.value = _fmt_price(deposits_eur, "EUR")
-            w_val.color = T_MUT
         else:
             w_val.value = "—"
             w_val.color = T_MUT
+
+        # Kolik pozic má cenu — neoceněné pozice se nevynechávají potichu
+        w_priced.value, warn = _priced_status(s.positions, _prices_loaded[0])
+        w_priced.color = AMBER if warn else T_MUT
 
         # Net Invested (sekundární text)
         currency = s.positions[0].currency if s.positions else "EUR"
         w_invested.value = f"Net Invested: {_fmt_price(s.total_cost_basis, currency)}"
 
-        # Net Deposits (CASH_IN − CASH_OUT, sekundární text pod Portfolio Value)
+        # Net Deposits (CASH_IN − CASH_OUT) — jen informace, nejsou součástí Portfolio Value
         if deposits_eur != Decimal("0"):
-            w_cash.value = f"Deposits: {_fmt_price(deposits_eur, 'EUR')}"
+            w_cash.value = f"Net deposits (info, not in value): {_fmt_price(deposits_eur, 'EUR')}"
             w_cash.color = BLUE_300
         else:
             w_cash.value = ""
@@ -361,9 +390,6 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
                 current_names.update(new_names)
                 save_names(db_path, current_names)
 
-        if not prices_raw and not unknown:
-            return
-
         enriched: List[PositionDTO] = []
         portfolio_value = Decimal("0")
 
@@ -411,6 +437,7 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
                 return   # stale update — mezitím proběhl refresh (např. delete)
             _names[0] = current_names
             _snap[0] = enriched_snap
+            _prices_loaded[0] = True
             _update_kpis()
             _build_cards()
             page.update()
@@ -429,6 +456,7 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
         logger.debug("snapshot: %.1f ms", (time.perf_counter() - t0) * 1000)
 
         _snap[0] = snap
+        _prices_loaded[0] = False
         _names[0] = load_names(db_path)
 
         t1 = time.perf_counter()
@@ -446,7 +474,7 @@ def build_portfolio_view(page: ft.Page, db_path: str) -> tuple:
     # ── Layout ────────────────────────────────────────────────────────────────
     kpi_row = ft.Row(
         [
-            _kpi_box("Portfolio Value", w_val, w_invested, w_cash),
+            _kpi_box("Portfolio Value", w_val, w_invested, w_priced, w_cash),
             _kpi_box("Unrealized P&L", w_pnl),
             _kpi_box("ROI",            w_roi),
         ],

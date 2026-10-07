@@ -26,6 +26,7 @@ _HEADERS = {
 
 _EXPLICIT_ALIASES: Dict[str, str] = {
     "BRKB.US": "BRK-B",
+    "AMZN.DE": "AMZ.DE",   # Amazon na Xetře má na Yahoo symbol AMZ.DE (AMZN.DE → HTTP 404)
 }
 
 # XTB suffix → Yahoo Finance suffix
